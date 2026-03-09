@@ -1,0 +1,2723 @@
+===== .github/workflows/python-app.yml =====
+# This workflow will install Python dependencies, run tests and lint with a single version of Python
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
+
+name: Python application
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v3
+      with:
+        python-version: "3.10"
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8 pytest
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+    - name: Lint with flake8
+      run: |
+        # stop the build if there are Python syntax errors or undefined names
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+    - name: Test with pytest
+      run: |
+        pytest
+
+===== .gitignore =====
+# -----------------------------
+
+# Python
+
+# -----------------------------
+
+**pycache**/
+*.py[cod]
+*$py.class
+
+# Compiled extensions
+
+*.so
+
+# -----------------------------
+
+# Virtual environments
+
+# -----------------------------
+
+.venv/
+venv/
+env/
+ENV/
+
+# -----------------------------
+
+# Python packaging
+
+# -----------------------------
+
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# -----------------------------
+
+# Logs
+
+# -----------------------------
+
+*.log
+
+# -----------------------------
+
+# Database
+
+# -----------------------------
+
+cluster.db
+*.sqlite
+*.sqlite3
+
+# -----------------------------
+
+# Uvicorn / dev server artifacts
+
+# -----------------------------
+
+.reload
+*.pid
+
+# -----------------------------
+
+# Environment files
+
+# -----------------------------
+
+.env
+.env.*
+
+# -----------------------------
+
+# macOS
+
+# -----------------------------
+
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# -----------------------------
+
+# Editors
+
+# -----------------------------
+
+.vscode/
+.idea/
+
+# -----------------------------
+
+# Temporary files
+
+# ---
+
+cluster.db
+
+===== README.md =====
+# Tiny Control Plane
+
+Welcome to **Tiny Control Plane**, a small distributed systems playground written in Python.
+
+This project demonstrates the core concepts behind real world orchestrators Kubernetes, Mesos and the like. Instead of thousands of lines of Go, YAML, and existential dread we (Gemini, ChatGPT and Claude) built it with **Python, curiosity, and a healthy (read: minimal) amount of input from a human.**
+
+Yes, this entire mini‑orchestrator was vibe‑coded.
+
+Which means:
+
+> "I vaguely know what I'm doing, the architecture makes sense in my head,
+> and the code appears to work."
+
+Somehow, this still resulted in:
+
+* agents
+* cluster membership
+* health checks
+* job scheduling
+* label-based node selection
+* least-loaded binpacking
+* reconciliation loop
+* Docker container execution
+* workload lifecycle management
+* formal job states with failure handling
+* job leases and lost job detection
+* job cancellation with process termination
+* a CLI that tells you what is actually happening
+* scaling workloads up and down
+* per-node authentication and revocation
+
+
+---
+
+# Architecture
+
+The system has three components:
+
+```
+controller → central brain (FastAPI + SQLite)
+agent      → node worker (polling)
+cli        → operator tool (Typer + Rich)
+```
+
+Agents poll the controller for work. The controller maintains desired state via a reconciliation loop.
+
+---
+
+# Features
+
+### Authentication
+
+The controller uses a two-token system.
+
+**Bootstrap token** — a shared secret set via `TCP_BOOTSTRAP_TOKEN` on both the controller and each agent. Used only for the initial registration request. If it is wrong or missing, the agent exits immediately.
+
+**Node token** — a UUID issued by the controller on successful registration. The agent sends it as `X-Node-Token` on every subsequent request. Each node has its own token, so individual nodes can be revoked without affecting others.
+
+Re-registering issues a new token and immediately invalidates the old one.
+
+---
+
+### Node Registration
+
+Agents register themselves with a node ID, labels, and resource capacity. Labels are used for scheduling constraints. The controller issues a node token on successful registration.
+
+---
+
+### Health Monitoring
+
+Agents report CPU usage, memory usage, and disk free on every poll cycle. The controller marks a node **unhealthy** if CPU or memory exceed 90%. Unhealthy nodes are excluded from scheduling. Nodes that have not reported within 30 seconds are considered stale and also excluded.
+
+---
+
+### Job Queue
+
+Jobs are stored in SQLite. Agents poll for pending jobs assigned to their node ID and execute them locally — either as a shell command or inside a Docker container, depending on whether an image is specified. Jobs run in background threads, so a node can pick up new work while existing jobs are still running.
+
+---
+
+### Job Lifecycle
+
+Every job moves through a defined set of states:
+
+```
+pending → running → succeeded
+                  → failed
+                  → lost
+```
+
+`pending` — scheduled, not yet picked up by an agent.
+`running` — agent has claimed the job and is executing it.
+`succeeded` — completed with exit code 0.
+`failed` — completed with a non-zero exit code.
+`lost` — was running but the agent disappeared or the job was cancelled.
+
+Only `pending` and `running` jobs count as active. The reconciler uses this to determine how many new jobs to create for a workload.
+
+---
+
+### Job Leases
+
+When an agent picks up a job it receives a lease expiring after 60 seconds. The agent renews it every 15 seconds via heartbeat. If an agent dies mid-job, heartbeats stop, and the next reconcile pass marks the job `lost` and schedules a replacement.
+
+---
+
+### Job Cancellation
+
+When a job is cancelled (via scale-down or undeploy), the controller records a cancellation entry for that job's node. The agent polls `GET /agent/cancel/{node}` on every loop iteration. When a cancel is received, the agent terminates the process:
+
+- Shell jobs receive SIGTERM, then SIGKILL after a 5-second grace period.
+- Docker jobs are stopped via `docker stop`, which also sends SIGTERM then SIGKILL.
+
+Cancellations are delivered exactly once — the poll endpoint is a destructive read.
+
+---
+
+### Scheduler
+
+Jobs are placed using a pipeline of:
+
+1. **Label constraint matching** — only nodes satisfying all workload constraints are considered.
+2. **Health and staleness filter** — unhealthy or stale nodes are excluded.
+3. **Least active jobs** — the node with the fewest pending+running jobs is preferred.
+4. **Lowest CPU** — used as a tiebreaker when job counts are equal.
+5. **Random shuffle** — candidates are shuffled before sorting so exact ties are broken randomly.
+
+---
+
+### Docker Execution
+
+Jobs can run inside Docker containers using `docker run --rm --network none`. Containers clean up after themselves and have no outbound network access by default. The agent captures the container ID via `--cidfile` to enable cancellation via `docker stop`.
+
+---
+
+### Workloads
+
+A workload declares a desired number of replicas for a command:
+
+```bash
+python cli/tcp.py deploy workers uptime 3
+python cli/tcp.py deploy alpine-workers "echo hello" 2 --image alpine
+python cli/tcp.py deploy eu-workers uptime 3 --constraint region=eu
+```
+
+The controller ensures the declared number of replicas are always running. If jobs finish, fail, or get lost, the reconciler schedules replacements on the next pass. Each job is linked to its workload by name, so two workloads with the same command do not interfere with each other's replica counts.
+
+---
+
+### Scaling
+
+To change the replica count of a running workload:
+
+```bash
+python cli/tcp.py scale workers 1
+```
+
+Scaling up schedules new jobs on the next reconcile pass. Scaling down immediately cancels excess jobs — pending jobs are cancelled before running ones — and sends kill signals to the agents hosting them.
+
+---
+
+### Stopping Workloads
+
+```bash
+python cli/tcp.py undeploy workers
+```
+
+Removes the workload from the controller. The reconciler stops scheduling new jobs for it. Running jobs complete normally unless explicitly cancelled beforehand.
+
+---
+
+### Node Revocation
+
+```bash
+python cli/tcp.py revoke node1
+```
+
+Sets the node token to NULL. The node's next request receives a 401. The agent logs the rejection and backs off rather than crashing, preserving any in-memory state.
+
+---
+
+### Logs
+
+Agent stdout is captured line by line and stored in the controller database.
+
+```bash
+python cli/tcp.py logs <job_id>
+```
+
+Works for both shell and Docker workloads.
+
+---
+
+### Status View
+
+```bash
+python cli/tcp.py status
+```
+
+Displays a formatted table of all jobs with node, workload, command, colour-coded status, and elapsed time. Active jobs show time since creation. Terminal jobs show how long they actually ran.
+
+---
+
+### Concurrent Safety
+
+The SQLite layer uses per-thread connections and a write lock, so the reconcile loop and FastAPI request handlers do not race each other.
+
+---
+
+# Running the System
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Set the bootstrap token on both the controller host and each agent host:
+
+```bash
+export TCP_BOOTSTRAP_TOKEN=your-secret-here
+```
+
+Start the controller:
+
+```bash
+./run-controller.sh
+```
+
+Start agents:
+
+```bash
+python agent/agent.py --node-id node1 --port 9000
+python agent/agent.py --node-id node1 --port 9000 --label region=eu
+```
+
+---
+
+# CLI Reference
+
+```bash
+python cli/tcp.py nodes                                          # list nodes
+python cli/tcp.py watch                                          # live node view
+python cli/tcp.py exec <node> <command> [--image <image>]        # run one-off job
+python cli/tcp.py deploy <name> <command> <replicas> \
+    [--image <image>] [--constraint key=value]                   # declare workload
+python cli/tcp.py scale <name> <replicas>                        # change replica count
+python cli/tcp.py undeploy <name>                                # remove workload
+python cli/tcp.py revoke <node>                                  # revoke node token
+python cli/tcp.py status                                         # job status table
+python cli/tcp.py jobs                                           # raw job list (JSON)
+python cli/tcp.py logs <job_id>                                  # job output
+```
+
+---
+
+# Running Tests
+
+```bash
+pytest
+```
+
+Tests are synchronous and call `reconcile_once()` directly. Each test gets an isolated SQLite database via `tmp_path`.
+
+
+===== agent/agent.py =====
+import socket, psutil, httpx, subprocess, argparse, time, threading, queue, os, sys, signal
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--node-id", default=socket.gethostname())
+parser.add_argument("--port", type=int, default=9000)
+parser.add_argument("--label", action="append", help="Node labels: key=value")
+args = parser.parse_args()
+
+CONTROLLER = "http://localhost:8000"
+HEARTBEAT_INTERVAL = 15  # seconds between heartbeats while a job is running
+
+node = args.node_id
+
+STATUS_SUCCEEDED = "succeeded"
+STATUS_FAILED    = "failed"
+
+# Queue for completed jobs: (job_id, status, result)
+_results: queue.Queue = queue.Queue()
+
+# Set of job_ids currently being heartbeated
+_running_jobs: set = set()
+_running_lock = threading.Lock()
+
+# Set after successful registration
+_node_token: str | None = None
+
+# Map of job_id -> subprocess.Popen (shell) or container_id str (docker)
+_processes: dict = {}
+_processes_lock = threading.Lock()
+
+
+def _headers() -> dict:
+    if _node_token:
+        return {"X-Node-Token": _node_token}
+    return {}
+
+
+def parse_labels(label_args):
+    labels = {}
+    for l in label_args or []:
+        k, _, v = l.partition("=")
+        labels[k] = v
+    return labels
+
+
+def state():
+    disk = psutil.disk_usage("/")
+    return {
+        "node": node,
+        "cpu": psutil.cpu_percent() / 100,
+        "mem": psutil.virtual_memory().percent / 100,
+        "disk_free": disk.free / disk.total,
+    }
+
+
+def register():
+    global _node_token
+    bootstrap_token = os.environ.get("TCP_BOOTSTRAP_TOKEN", "")
+    if not bootstrap_token:
+        print("[agent] TCP_BOOTSTRAP_TOKEN is not set, cannot register")
+        sys.exit(1)
+
+    r = httpx.post(
+        f"{CONTROLLER}/register",
+        json={
+            "node": node,
+            "address": f"http://localhost:{args.port}",
+            "labels": parse_labels(args.label),
+        },
+        headers={"X-Bootstrap-Token": bootstrap_token},
+    )
+    if r.status_code == 401:
+        print("[agent] registration rejected: invalid bootstrap token")
+        sys.exit(1)
+
+    _node_token = r.json()["token"]
+    print(f"[agent] registered as {node}")
+
+
+def run_shell(command: str) -> tuple[subprocess.Popen, str]:
+    proc = subprocess.Popen(
+        command,
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    out, _ = proc.communicate()
+    return proc, out.decode()
+
+
+def run_docker(image: str, command: str) -> tuple[str, str]:
+    """Returns (container_id, output)."""
+    # Use --cidfile to capture the container ID for later cancellation
+    import tempfile
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".cid") as f:
+        cidfile = f.name
+
+    cmd = ["docker", "run", "--rm", "--network", "none", f"--cidfile={cidfile}", image]
+    if command:
+        cmd += command.split()
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        out, _ = proc.communicate()
+        try:
+            container_id = open(cidfile).read().strip()
+        except Exception:
+            container_id = ""
+        return container_id, out.decode(), proc.returncode
+    finally:
+        try:
+            os.unlink(cidfile)
+        except Exception:
+            pass
+
+
+def execute(job: dict) -> tuple[str, str]:
+    job_id = job["job"]
+    try:
+        if job.get("image"):
+            container_id, out, returncode = run_docker(job["image"], job["command"])
+            with _processes_lock:
+                _processes[job_id] = ("docker", container_id)
+            if returncode != 0:
+                return STATUS_FAILED, out
+            return STATUS_SUCCEEDED, out
+        else:
+            proc, out = run_shell(job["command"])
+            with _processes_lock:
+                _processes[job_id] = ("shell", proc)
+            if proc.returncode != 0:
+                return STATUS_FAILED, out
+            return STATUS_SUCCEEDED, out
+    except Exception as e:
+        return STATUS_FAILED, str(e)
+
+
+def send_logs(job_id: str, output: str):
+    for line in output.splitlines():
+        try:
+            httpx.post(
+                f"{CONTROLLER}/agent/log",
+                json={"job": job_id, "line": line, "node": node},
+                headers=_headers(),
+                timeout=1,
+            )
+        except Exception:
+            pass
+
+
+def run_job_thread(job: dict):
+    """
+    Runs in a background thread. Executes the job, sends logs, then puts
+    the result on the queue for the main loop to post back to the controller.
+    """
+    job_id = job["job"]
+
+    with _running_lock:
+        _running_jobs.add(job_id)
+
+    try:
+        status, result = execute(job)
+        send_logs(job_id, result)
+        _results.put((job_id, status, result))
+    finally:
+        with _running_lock:
+            _running_jobs.discard(job_id)
+        with _processes_lock:
+            _processes.pop(job_id, None)
+
+
+def send_heartbeats():
+    """Send a heartbeat for every job currently running."""
+    with _running_lock:
+        job_ids = list(_running_jobs)
+
+    for job_id in job_ids:
+        try:
+            httpx.post(
+                f"{CONTROLLER}/agent/heartbeat/{job_id}",
+                json={"node": node},
+                headers=_headers(),
+                timeout=1,
+            )
+        except Exception:
+            pass
+
+
+def kill_job(job_id: str):
+    """Terminate a running job by job_id. SIGTERM first, SIGKILL if still alive."""
+    with _processes_lock:
+        entry = _processes.pop(job_id, None)
+
+    if entry is None:
+        return
+
+    kind, handle = entry
+
+    if kind == "shell":
+        proc = handle
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        except Exception as e:
+            print(f"[{node}] failed to kill shell job {job_id}: {e}")
+
+    elif kind == "docker":
+        container_id = handle
+        if container_id:
+            try:
+                subprocess.run(["docker", "stop", container_id], timeout=10)
+            except Exception as e:
+                print(f"[{node}] failed to stop container {container_id}: {e}")
+
+    print(f"[{node}] cancelled job {job_id}")
+
+
+def loop():
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            httpx.post(
+                f"{CONTROLLER}/state",
+                json=state(),
+                headers=_headers(),
+            )
+
+            # Send heartbeats on interval
+            now = time.time()
+            if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+                send_heartbeats()
+                last_heartbeat = now
+
+            # Check for cancellation requests
+            try:
+                r = httpx.get(
+                    f"{CONTROLLER}/agent/cancel/{node}",
+                    headers=_headers(),
+                    timeout=2,
+                )
+                for job_id in r.json().get("cancel", []):
+                    print(f"[{node}] received cancel for job {job_id}")
+                    kill_job(job_id)
+            except Exception:
+                pass
+
+            # Drain completed jobs and post results
+            while not _results.empty():
+                job_id, status, result = _results.get_nowait()
+                print(f"[{node}] job {job_id}: {status}")
+                try:
+                    httpx.post(
+                        f"{CONTROLLER}/agent/result",
+                        json={"job": job_id, "status": status, "result": result, "node": node},
+                        headers=_headers(),
+                    )
+                except Exception as e:
+                    print(f"[{node}] failed to post result for {job_id}: {e}")
+
+            # Pick up a new pending job (one per poll cycle is fine)
+            r = httpx.get(
+                f"{CONTROLLER}/agent/jobs/{node}",
+                headers=_headers(),
+            )
+            if r.status_code == 401:
+                print(f"[{node}] token rejected by controller — node may have been revoked")
+                time.sleep(10)
+                continue
+
+            data = r.json()
+
+            if "job" in data:
+                job_id = data["job"]
+                image = data.get("image")
+                command = data.get("command")
+
+                if image:
+                    print(f"[{node}] starting job {job_id}: docker run {image} {command}")
+                else:
+                    print(f"[{node}] starting job {job_id}: shell: {command}")
+
+                t = threading.Thread(target=run_job_thread, args=(data,), daemon=True)
+                t.start()
+
+        except Exception as e:
+            print(f"[agent] error: {e}")
+
+        time.sleep(1)
+
+
+if __name__ == "__main__":
+    register()
+    loop()
+
+===== cli/tcp.py =====
+import typer, httpx, time
+from rich import print
+from rich.table import Table
+from rich.console import Console
+from typing import Optional
+
+API = "http://localhost:8000"
+app = typer.Typer()
+console = Console()
+
+ACTIVE_STATUSES = {"pending", "running"}
+
+STATUS_COLOUR = {
+    "pending":   "yellow",
+    "running":   "cyan",
+    "succeeded": "green",
+    "failed":    "red",
+    "lost":      "magenta",
+}
+
+
+def _fmt_elapsed(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60}s"
+    return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+
+
+@app.command()
+def nodes():
+    r = httpx.get(f"{API}/nodes")
+    print(r.json())
+
+
+@app.command()
+def watch():
+    while True:
+        nodes()
+        time.sleep(2)
+
+
+@app.command()
+def exec(node: str, command: str, image: Optional[str] = typer.Option(None, help="Docker image")):
+    r = httpx.post(f"{API}/jobs", json={"node": node, "command": command, "image": image})
+    print(r.json())
+
+
+@app.command()
+def status():
+    """Show all jobs with node, status, elapsed time, and workload."""
+    r = httpx.get(f"{API}/jobs")
+    job_list = r.json()
+
+    now = time.time()
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("job id",    style="dim",  no_wrap=True)
+    table.add_column("node",                    no_wrap=True)
+    table.add_column("workload",                no_wrap=True)
+    table.add_column("command",                 no_wrap=True)
+    table.add_column("status",                  no_wrap=True)
+    table.add_column("elapsed",   justify="right", no_wrap=True)
+
+    for j in sorted(job_list, key=lambda x: x.get("created") or 0):
+        status_val = j["status"]
+        colour = STATUS_COLOUR.get(status_val, "white")
+
+        created = j.get("created") or now
+        updated = j.get("updated") or now
+        if status_val in ACTIVE_STATUSES:
+            elapsed = _fmt_elapsed(now - created)
+        else:
+            elapsed = _fmt_elapsed(updated - created)
+
+        table.add_row(
+            j["id"][:8],
+            j.get("node") or "-",
+            j.get("workload_name") or "-",
+            (j.get("command") or "")[:30],
+            f"[{colour}]{status_val}[/{colour}]",
+            elapsed,
+        )
+
+    console.print(table)
+
+
+@app.command()
+def jobs():
+    r = httpx.get(f"{API}/jobs")
+    print(r.json())
+
+
+@app.command()
+def deploy(
+    name: str,
+    command: str,
+    replicas: int,
+    image: Optional[str] = typer.Option(None, help="Docker image to run"),
+    constraint: Optional[list[str]] = typer.Option(None, help="Label constraints: key=value"),
+):
+    constraints = {}
+    for c in (constraint or []):
+        k, _, v = c.partition("=")
+        constraints[k] = v
+
+    r = httpx.post(
+        f"{API}/workloads",
+        json={
+            "name": name,
+            "command": command,
+            "replicas": replicas,
+            "image": image,
+            "constraints": constraints or None,
+        }
+    )
+    print(r.json())
+
+
+@app.command()
+def scale(name: str, replicas: int):
+    r = httpx.post(f"{API}/workloads/{name}/scale", json={"replicas": replicas})
+    print(r.json())
+
+
+@app.command()
+def undeploy(name: str):
+    r = httpx.delete(f"{API}/workloads/{name}")
+    print(r.json())
+
+
+@app.command()
+def logs(job: str):
+    r = httpx.get(f"{API}/jobs/{job}/logs")
+    for line in r.json():
+        print(line["line"])
+
+
+@app.command()
+def revoke(node_id: str):
+    """Revoke a node's token, preventing it from communicating with the controller."""
+    r = httpx.delete(f"{API}/nodes/{node_id}")
+    print(r.json())
+
+
+if __name__ == "__main__":
+    app()
+
+===== controller/api.py =====
+import os
+from fastapi import FastAPI, Header, HTTPException
+import asyncio
+import random
+import time
+from contextlib import asynccontextmanager
+from controller.store import (
+    init_db,
+    register_node,
+    verify_node_token,
+    revoke_node,
+    update_state,
+    list_nodes,
+    create_job,
+    list_jobs,
+    get_pending_job,
+    start_job,
+    finish_job,
+    mark_lost,
+    renew_lease,
+    expire_lost_jobs,
+    enqueue_cancel,
+    pop_cancel_jobs,
+    create_workload,
+    list_workloads,
+    count_active_workload_jobs,
+    count_active_node_jobs,
+    get_excess_workload_jobs,
+    update_workload_replicas,
+    delete_workload,
+    store_log,
+    get_logs,
+    JobStatus,
+)
+
+NODE_STALE_SECONDS = 30
+
+
+def get_bootstrap_token() -> str:
+    token = os.environ.get("TCP_BOOTSTRAP_TOKEN", "")
+    if not token:
+        raise RuntimeError("TCP_BOOTSTRAP_TOKEN environment variable is not set")
+    return token
+
+
+def cancel_job(job_id: str, node_id: str):
+    """Mark a job lost and enqueue a cancellation signal for the agent."""
+    mark_lost(job_id)
+    enqueue_cancel(job_id, node_id)
+
+
+def require_agent_auth(node_id: str, x_node_token: str | None):
+    """Raise 401 if the node token is missing or invalid."""
+    if not x_node_token or not verify_node_token(node_id, x_node_token):
+        raise HTTPException(status_code=401, detail="invalid or missing node token")
+
+
+def pick_node(nodes: dict, constraints: dict, resources: dict) -> str | None:
+    """
+    Select a node using:
+    1. Only healthy, recently-seen nodes
+    2. Label constraint matching
+    3. Least active jobs (primary) + lowest CPU (secondary)
+    4. Random shuffle before sorting so equal scores are broken randomly
+    """
+    now = time.time()
+    candidates = []
+
+    for node_id, info in nodes.items():
+        if not info["healthy"]:
+            continue
+
+        if now - (info.get("last_seen") or 0) > NODE_STALE_SECONDS:
+            continue
+
+        labels = info.get("labels", {})
+        if not all(labels.get(k) == v for k, v in constraints.items()):
+            continue
+
+        job_count = count_active_node_jobs(node_id)
+        cpu_used = info.get("state", {}).get("cpu", 0)
+        candidates.append((job_count, cpu_used, node_id))
+
+    if not candidates:
+        return None
+
+    random.shuffle(candidates)
+    candidates.sort(key=lambda x: (x[0], x[1]))
+    return candidates[0][2]
+
+
+def reconcile_once():
+    # Expire leases before counting active jobs so lost jobs don't block
+    # workload replica targets
+    expire_lost_jobs()
+
+    workloads = list_workloads()
+    nodes = list_nodes()
+
+    for w in workloads:
+        running = count_active_workload_jobs(w["name"])
+        missing = w["replicas"] - running
+
+        for _ in range(missing):
+            node_id = pick_node(nodes, w.get("constraints", {}), w.get("resources", {}))
+            if node_id is None:
+                break
+            create_job(
+                node_id,
+                w["command"],
+                image=w.get("image"),
+                workload_name=w["name"],
+            )
+
+
+async def reconcile_loop():
+    while True:
+        try:
+            reconcile_once()
+        except Exception as e:
+            print(f"[reconcile] error: {e}")
+
+        await asyncio.sleep(5)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    init_db()
+    asyncio.create_task(reconcile_loop())
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.post("/register")
+def register(data: dict, x_bootstrap_token: str | None = Header(None)):
+    if x_bootstrap_token != get_bootstrap_token():
+        raise HTTPException(status_code=401, detail="invalid bootstrap token")
+    token = register_node(
+        data["node"],
+        data["address"],
+        data.get("labels"),
+        data.get("capacity"),
+    )
+    return {"ok": True, "token": token}
+
+
+@app.post("/state")
+def state(data: dict, x_node_token: str | None = Header(None)):
+    require_agent_auth(data["node"], x_node_token)
+    update_state(data["node"], data)
+    return {"ok": True}
+
+
+@app.get("/nodes")
+def nodes():
+    return list_nodes()
+
+
+@app.post("/jobs")
+def job(data: dict):
+    jid = create_job(data["node"], data["command"], image=data.get("image"))
+    return {"job": jid}
+
+
+@app.get("/jobs")
+def jobs():
+    return list_jobs()
+
+
+@app.get("/agent/jobs/{node}")
+def agent_job(node: str, x_node_token: str | None = Header(None)):
+    require_agent_auth(node, x_node_token)
+    job = get_pending_job(node)
+
+    if not job:
+        return {}
+
+    jid, cmd, image = job
+    start_job(jid)
+
+    return {"job": jid, "command": cmd, "image": image}
+
+
+@app.post("/agent/heartbeat/{job_id}")
+def agent_heartbeat(job_id: str, data: dict, x_node_token: str | None = Header(None)):
+    require_agent_auth(data["node"], x_node_token)
+    renew_lease(job_id)
+    return {"ok": True}
+
+
+@app.post("/agent/result")
+def agent_result(data: dict, x_node_token: str | None = Header(None)):
+    require_agent_auth(data["node"], x_node_token)
+    finish_job(data["job"], data["status"], data["result"])
+    return {"ok": True}
+
+
+@app.post("/agent/log")
+def agent_log(data: dict, x_node_token: str | None = Header(None)):
+    require_agent_auth(data["node"], x_node_token)
+    store_log(data["job"], data["line"])
+    return {"ok": True}
+
+
+@app.get("/agent/cancel/{node}")
+def agent_cancel(node: str, x_node_token: str | None = Header(None)):
+    require_agent_auth(node, x_node_token)
+    return {"cancel": pop_cancel_jobs(node)}
+
+
+@app.delete("/nodes/{node_id}")
+def revoke(node_id: str):
+    revoke_node(node_id)
+    return {"ok": True}
+
+
+@app.post("/workloads")
+def workload(data: dict):
+    create_workload(
+        data["name"],
+        data["command"],
+        data["replicas"],
+        image=data.get("image"),
+        constraints=data.get("constraints"),
+        resources=data.get("resources"),
+    )
+    return {"ok": True}
+
+
+@app.get("/workloads")
+def workloads():
+    return list_workloads()
+
+
+@app.post("/workloads/{name}/scale")
+def scale_workload(name: str, data: dict):
+    replicas = data["replicas"]
+    updated = update_workload_replicas(name, replicas)
+    if not updated:
+        raise HTTPException(status_code=404, detail="workload not found")
+
+    excess = get_excess_workload_jobs(name, replicas)
+    for job_id, node_id in excess:
+        cancel_job(job_id, node_id)
+
+    return {"ok": True, "replicas": replicas, "cancelled": len(excess)}
+
+
+@app.delete("/workloads/{name}")
+def remove_workload(name: str):
+    delete_workload(name)
+    return {"ok": True}
+
+
+@app.get("/jobs/{job_id}/logs")
+def job_logs(job_id: str):
+    return get_logs(job_id)
+
+===== controller/store.py =====
+import sqlite3, json, time, uuid, threading
+
+_local = threading.local()
+_db_lock = threading.Lock()
+
+DB_PATH = "cluster.db"
+
+LEASE_SECONDS = 60
+
+
+class JobStatus:
+    PENDING   = "pending"
+    RUNNING   = "running"
+    SUCCEEDED = "succeeded"
+    FAILED    = "failed"
+    LOST      = "lost"
+
+    TERMINAL = {SUCCEEDED, FAILED, LOST}
+    ACTIVE   = {PENDING, RUNNING}
+
+
+def get_db():
+    path = DB_PATH
+    if not hasattr(_local, "conn") or _local.conn is None or _local.db_path != path:
+        if hasattr(_local, "conn") and _local.conn is not None:
+            _local.conn.close()
+        _local.conn = sqlite3.connect(path, check_same_thread=True)
+        _local.conn.row_factory = sqlite3.Row
+        _local.db_path = path
+    return _local.conn
+
+
+def init_db(path=None):
+    global DB_PATH
+    if path:
+        DB_PATH = str(path)
+    _local.conn = None
+
+    db = get_db()
+    db.execute("""
+    CREATE TABLE IF NOT EXISTS nodes (
+        id TEXT PRIMARY KEY,
+        address TEXT,
+        labels TEXT,
+        capacity TEXT,
+        healthy INTEGER,
+        last_seen REAL,
+        state_json TEXT,
+        token TEXT
+    )
+    """)
+
+    db.execute("""
+    CREATE TABLE IF NOT EXISTS jobs (
+        id TEXT PRIMARY KEY,
+        node_id TEXT,
+        command TEXT,
+        image TEXT,
+        workload_name TEXT,
+        constraints TEXT,
+        resources TEXT,
+        status TEXT,
+        result TEXT,
+        created REAL,
+        updated REAL,
+        lease_expires REAL
+    )
+    """)
+
+    db.execute("""
+    CREATE TABLE IF NOT EXISTS workloads (
+        name TEXT PRIMARY KEY,
+        command TEXT,
+        image TEXT,
+        replicas INTEGER,
+        constraints TEXT,
+        resources TEXT
+    )
+    """)
+
+    db.execute("""
+    CREATE TABLE IF NOT EXISTS logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id TEXT,
+        ts REAL,
+        line TEXT
+    )
+    """)
+
+    db.execute("""
+    CREATE TABLE IF NOT EXISTS cancel_jobs (
+        job_id TEXT PRIMARY KEY,
+        node_id TEXT,
+        created REAL
+    )
+    """)
+
+    db.commit()
+
+
+def register_node(node_id, address, labels=None, capacity=None):
+    token = str(uuid.uuid4())
+    with _db_lock:
+        get_db().execute(
+            "INSERT OR REPLACE INTO nodes VALUES (?,?,?,?,?,?,?,?)",
+            (
+                node_id,
+                address,
+                json.dumps(labels or {}),
+                json.dumps(capacity or {}),
+                1,
+                time.time(),
+                None,
+                token,
+            )
+        )
+        get_db().commit()
+    return token
+
+
+def verify_node_token(node_id, token):
+    """Return True if the token matches the stored token for node_id."""
+    row = get_db().execute(
+        "SELECT token FROM nodes WHERE id=?",
+        (node_id,)
+    ).fetchone()
+    if row is None:
+        return False
+    return row[0] == token
+
+
+def revoke_node(node_id):
+    """Set the node token to NULL, blocking further authenticated requests."""
+    with _db_lock:
+        get_db().execute(
+            "UPDATE nodes SET token=NULL WHERE id=?",
+            (node_id,)
+        )
+        get_db().commit()
+
+
+def update_state(node_id, state):
+    cpu = state.get("cpu", 0)
+    mem = state.get("mem", 0)
+    healthy = int(cpu < 0.9 and mem < 0.9)
+    with _db_lock:
+        get_db().execute(
+            "UPDATE nodes SET state_json=?, last_seen=?, healthy=? WHERE id=?",
+            (json.dumps(state), time.time(), healthy, node_id)
+        )
+        get_db().commit()
+
+
+def list_nodes():
+    rows = get_db().execute(
+        "SELECT id,address,labels,capacity,healthy,state_json,last_seen FROM nodes"
+    ).fetchall()
+
+    result = {}
+    for r in rows:
+        result[r[0]] = {
+            "address": r[1],
+            "labels": json.loads(r[2]) if r[2] else {},
+            "capacity": json.loads(r[3]) if r[3] else {},
+            "healthy": bool(r[4]),
+            "state": json.loads(r[5]) if r[5] else {},
+            "last_seen": r[6],
+        }
+
+    return result
+
+
+def create_job(node_id, command, image=None, workload_name=None):
+    jid = str(uuid.uuid4())
+    with _db_lock:
+        get_db().execute(
+            """
+            INSERT INTO jobs (
+                id, node_id, command, image, workload_name,
+                constraints, resources, status, result, created, updated, lease_expires
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                jid,
+                node_id,
+                command,
+                image,
+                workload_name,
+                "{}",
+                "{}",
+                JobStatus.PENDING,
+                None,
+                time.time(),
+                time.time(),
+                None,
+            ),
+        )
+        get_db().commit()
+
+    return jid
+
+
+def get_pending_job(node_id):
+    row = get_db().execute(
+        "SELECT id, command, image FROM jobs WHERE node_id=? AND status=? LIMIT 1",
+        (node_id, JobStatus.PENDING)
+    ).fetchone()
+    return row
+
+
+def start_job(job_id):
+    with _db_lock:
+        get_db().execute(
+            "UPDATE jobs SET status=?, updated=?, lease_expires=? WHERE id=?",
+            (JobStatus.RUNNING, time.time(), time.time() + LEASE_SECONDS, job_id)
+        )
+        get_db().commit()
+
+
+def renew_lease(job_id):
+    with _db_lock:
+        get_db().execute(
+            "UPDATE jobs SET lease_expires=? WHERE id=? AND status=?",
+            (time.time() + LEASE_SECONDS, job_id, JobStatus.RUNNING)
+        )
+        get_db().commit()
+
+
+def finish_job(job_id, status, result):
+    if status == "finished":
+        status = JobStatus.SUCCEEDED
+    with _db_lock:
+        get_db().execute(
+            "UPDATE jobs SET status=?, result=?, updated=?, lease_expires=NULL WHERE id=?",
+            (status, result, time.time(), job_id)
+        )
+        get_db().commit()
+
+
+def mark_lost(job_id):
+    with _db_lock:
+        get_db().execute(
+            "UPDATE jobs SET status=?, updated=? WHERE id=?",
+            (JobStatus.LOST, time.time(), job_id)
+        )
+        get_db().commit()
+
+
+def expire_lost_jobs():
+    """Mark running jobs whose lease has expired as lost."""
+    with _db_lock:
+        get_db().execute(
+            """
+            UPDATE jobs SET status=?, updated=?
+            WHERE status=? AND lease_expires IS NOT NULL AND lease_expires < ?
+            """,
+            (JobStatus.LOST, time.time(), JobStatus.RUNNING, time.time())
+        )
+        get_db().commit()
+
+
+def list_jobs():
+    rows = get_db().execute(
+        "SELECT id, node_id, command, image, workload_name, status, result, created, updated FROM jobs"
+    ).fetchall()
+
+    return [
+        {
+            "id": r[0],
+            "node": r[1],
+            "command": r[2],
+            "image": r[3],
+            "workload_name": r[4],
+            "status": r[5],
+            "result": r[6],
+            "created": r[7],
+            "updated": r[8],
+        }
+        for r in rows
+    ]
+
+
+def count_active_node_jobs(node_id):
+    """Count pending+running jobs assigned to a node."""
+    placeholders = ",".join("?" * len(JobStatus.ACTIVE))
+    row = get_db().execute(
+        f"SELECT COUNT(*) FROM jobs WHERE node_id=? AND status IN ({placeholders})",
+        (node_id, *JobStatus.ACTIVE)
+    ).fetchone()
+    return row[0]
+
+
+def count_active_workload_jobs(workload_name):
+    placeholders = ",".join("?" * len(JobStatus.ACTIVE))
+    row = get_db().execute(
+        f"SELECT COUNT(*) FROM jobs WHERE workload_name=? AND status IN ({placeholders})",
+        (workload_name, *JobStatus.ACTIVE)
+    ).fetchone()
+    return row[0]
+
+
+def get_excess_workload_jobs(workload_name, keep):
+    """
+    Return (job_id, node_id) tuples for active jobs beyond the desired replica count.
+    Prefers to mark pending jobs lost before running ones.
+    """
+    placeholders = ",".join("?" * len(JobStatus.ACTIVE))
+    rows = get_db().execute(
+        f"""
+        SELECT id, node_id, status FROM jobs
+        WHERE workload_name=? AND status IN ({placeholders})
+        ORDER BY
+            CASE status WHEN 'pending' THEN 0 ELSE 1 END,
+            created DESC
+        """,
+        (workload_name, *JobStatus.ACTIVE)
+    ).fetchall()
+
+    excess = len(rows) - keep
+    if excess <= 0:
+        return []
+    return [(r[0], r[1]) for r in rows[:excess]]
+
+
+def update_workload_replicas(name, replicas):
+    """Update replica count for a workload. Returns True if found, False if not."""
+    with _db_lock:
+        cur = get_db().execute(
+            "UPDATE workloads SET replicas=? WHERE name=?",
+            (replicas, name)
+        )
+        get_db().commit()
+    return cur.rowcount > 0
+
+
+def create_workload(name, command, replicas, image=None, constraints=None, resources=None):
+    with _db_lock:
+        get_db().execute(
+            "INSERT OR REPLACE INTO workloads VALUES (?,?,?,?,?,?)",
+            (name, command, image, replicas, json.dumps(constraints or {}), json.dumps(resources or {}))
+        )
+        get_db().commit()
+
+
+def delete_workload(name):
+    with _db_lock:
+        get_db().execute("DELETE FROM workloads WHERE name=?", (name,))
+        get_db().commit()
+
+
+def list_workloads():
+    rows = get_db().execute(
+        "SELECT name, command, image, replicas, constraints, resources FROM workloads"
+    ).fetchall()
+
+    return [
+        {
+            "name": r[0],
+            "command": r[1],
+            "image": r[2],
+            "replicas": r[3],
+            "constraints": json.loads(r[4]) if r[4] else {},
+            "resources": json.loads(r[5]) if r[5] else {},
+        }
+        for r in rows
+    ]
+
+
+def enqueue_cancel(job_id, node_id):
+    """Record that a job should be cancelled on its node."""
+    with _db_lock:
+        get_db().execute(
+            "INSERT OR REPLACE INTO cancel_jobs(job_id, node_id, created) VALUES (?,?,?)",
+            (job_id, node_id, time.time()),
+        )
+        get_db().commit()
+
+
+def pop_cancel_jobs(node_id):
+    """Return and remove all pending cancellations for a node."""
+    with _db_lock:
+        rows = get_db().execute(
+            "SELECT job_id FROM cancel_jobs WHERE node_id=?",
+            (node_id,)
+        ).fetchall()
+        if rows:
+            placeholders = ",".join("?" * len(rows))
+            job_ids = [r[0] for r in rows]
+            get_db().execute(
+                f"DELETE FROM cancel_jobs WHERE job_id IN ({placeholders})",
+                job_ids,
+            )
+            get_db().commit()
+    return [r[0] for r in rows]
+
+
+def store_log(job_id, line):
+    with _db_lock:
+        get_db().execute(
+            "INSERT INTO logs(job_id, ts, line) VALUES (?,?,?)",
+            (job_id, time.time(), line),
+        )
+        get_db().commit()
+
+
+def get_logs(job_id):
+    rows = get_db().execute(
+        "SELECT ts, line FROM logs WHERE job_id=? ORDER BY id",
+        (job_id,),
+    ).fetchall()
+
+    return [{"ts": r[0], "line": r[1]} for r in rows]
+
+===== pytest.ini =====
+[pytest]
+testpaths = tests
+
+===== requirements.txt =====
+
+fastapi
+uvicorn
+httpx
+psutil
+typer
+rich
+prometheus-client
+
+===== run-controller.sh =====
+
+#!/usr/bin/env bash
+uvicorn controller.api:app --host 0.0.0.0 --port 8000 --reload --no-server-header
+
+===== tests/conftest.py =====
+import sys
+from pathlib import Path
+
+# Add project root to PYTHONPATH so tests can import controller modules
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+
+===== tests/test_agent.py =====
+import socket, psutil, httpx, subprocess, argparse, time, threading, queue, os, sys, signal
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--node-id", default=socket.gethostname())
+parser.add_argument("--port", type=int, default=9000)
+parser.add_argument("--label", action="append", help="Node labels: key=value")
+args = parser.parse_args()
+
+CONTROLLER = "http://localhost:8000"
+HEARTBEAT_INTERVAL = 15  # seconds between heartbeats while a job is running
+
+node = args.node_id
+
+STATUS_SUCCEEDED = "succeeded"
+STATUS_FAILED    = "failed"
+
+# Queue for completed jobs: (job_id, status, result)
+_results: queue.Queue = queue.Queue()
+
+# Set of job_ids currently being heartbeated
+_running_jobs: set = set()
+_running_lock = threading.Lock()
+
+# Set after successful registration
+_node_token: str | None = None
+
+# Map of job_id -> subprocess.Popen (shell) or container_id str (docker)
+_processes: dict = {}
+_processes_lock = threading.Lock()
+
+
+def _headers() -> dict:
+    if _node_token:
+        return {"X-Node-Token": _node_token}
+    return {}
+
+
+def parse_labels(label_args):
+    labels = {}
+    for l in label_args or []:
+        k, _, v = l.partition("=")
+        labels[k] = v
+    return labels
+
+
+def state():
+    disk = psutil.disk_usage("/")
+    return {
+        "node": node,
+        "cpu": psutil.cpu_percent() / 100,
+        "mem": psutil.virtual_memory().percent / 100,
+        "disk_free": disk.free / disk.total,
+    }
+
+
+def register():
+    global _node_token
+    bootstrap_token = os.environ.get("TCP_BOOTSTRAP_TOKEN", "")
+    if not bootstrap_token:
+        print("[agent] TCP_BOOTSTRAP_TOKEN is not set, cannot register")
+        sys.exit(1)
+
+    r = httpx.post(
+        f"{CONTROLLER}/register",
+        json={
+            "node": node,
+            "address": f"http://localhost:{args.port}",
+            "labels": parse_labels(args.label),
+        },
+        headers={"X-Bootstrap-Token": bootstrap_token},
+    )
+    if r.status_code == 401:
+        print("[agent] registration rejected: invalid bootstrap token")
+        sys.exit(1)
+
+    _node_token = r.json()["token"]
+    print(f"[agent] registered as {node}")
+
+
+def run_shell(command: str) -> tuple[subprocess.Popen, str]:
+    proc = subprocess.Popen(
+        command,
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    out, _ = proc.communicate()
+    return proc, out.decode()
+
+
+def run_docker(image: str, command: str) -> tuple[str, str]:
+    """Returns (container_id, output)."""
+    # Use --cidfile to capture the container ID for later cancellation
+    import tempfile
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".cid") as f:
+        cidfile = f.name
+
+    cmd = ["docker", "run", "--rm", "--network", "none", f"--cidfile={cidfile}", image]
+    if command:
+        cmd += command.split()
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        out, _ = proc.communicate()
+        try:
+            container_id = open(cidfile).read().strip()
+        except Exception:
+            container_id = ""
+        return container_id, out.decode(), proc.returncode
+    finally:
+        try:
+            os.unlink(cidfile)
+        except Exception:
+            pass
+
+
+def execute(job: dict) -> tuple[str, str]:
+    job_id = job["job"]
+    try:
+        if job.get("image"):
+            container_id, out, returncode = run_docker(job["image"], job["command"])
+            with _processes_lock:
+                _processes[job_id] = ("docker", container_id)
+            if returncode != 0:
+                return STATUS_FAILED, out
+            return STATUS_SUCCEEDED, out
+        else:
+            proc, out = run_shell(job["command"])
+            with _processes_lock:
+                _processes[job_id] = ("shell", proc)
+            if proc.returncode != 0:
+                return STATUS_FAILED, out
+            return STATUS_SUCCEEDED, out
+    except Exception as e:
+        return STATUS_FAILED, str(e)
+
+
+def send_logs(job_id: str, output: str):
+    for line in output.splitlines():
+        try:
+            httpx.post(
+                f"{CONTROLLER}/agent/log",
+                json={"job": job_id, "line": line, "node": node},
+                headers=_headers(),
+                timeout=1,
+            )
+        except Exception:
+            pass
+
+
+def run_job_thread(job: dict):
+    """
+    Runs in a background thread. Executes the job, sends logs, then puts
+    the result on the queue for the main loop to post back to the controller.
+    """
+    job_id = job["job"]
+
+    with _running_lock:
+        _running_jobs.add(job_id)
+
+    try:
+        status, result = execute(job)
+        send_logs(job_id, result)
+        _results.put((job_id, status, result))
+    finally:
+        with _running_lock:
+            _running_jobs.discard(job_id)
+        with _processes_lock:
+            _processes.pop(job_id, None)
+
+
+def send_heartbeats():
+    """Send a heartbeat for every job currently running."""
+    with _running_lock:
+        job_ids = list(_running_jobs)
+
+    for job_id in job_ids:
+        try:
+            httpx.post(
+                f"{CONTROLLER}/agent/heartbeat/{job_id}",
+                json={"node": node},
+                headers=_headers(),
+                timeout=1,
+            )
+        except Exception:
+            pass
+
+
+def kill_job(job_id: str):
+    """Terminate a running job by job_id. SIGTERM first, SIGKILL if still alive."""
+    with _processes_lock:
+        entry = _processes.pop(job_id, None)
+
+    if entry is None:
+        return
+
+    kind, handle = entry
+
+    if kind == "shell":
+        proc = handle
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        except Exception as e:
+            print(f"[{node}] failed to kill shell job {job_id}: {e}")
+
+    elif kind == "docker":
+        container_id = handle
+        if container_id:
+            try:
+                subprocess.run(["docker", "stop", container_id], timeout=10)
+            except Exception as e:
+                print(f"[{node}] failed to stop container {container_id}: {e}")
+
+    print(f"[{node}] cancelled job {job_id}")
+
+
+def loop():
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            httpx.post(
+                f"{CONTROLLER}/state",
+                json=state(),
+                headers=_headers(),
+            )
+
+            # Send heartbeats on interval
+            now = time.time()
+            if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+                send_heartbeats()
+                last_heartbeat = now
+
+            # Check for cancellation requests
+            try:
+                r = httpx.get(
+                    f"{CONTROLLER}/agent/cancel/{node}",
+                    headers=_headers(),
+                    timeout=2,
+                )
+                for job_id in r.json().get("cancel", []):
+                    print(f"[{node}] received cancel for job {job_id}")
+                    kill_job(job_id)
+            except Exception:
+                pass
+
+            # Drain completed jobs and post results
+            while not _results.empty():
+                job_id, status, result = _results.get_nowait()
+                print(f"[{node}] job {job_id}: {status}")
+                try:
+                    httpx.post(
+                        f"{CONTROLLER}/agent/result",
+                        json={"job": job_id, "status": status, "result": result, "node": node},
+                        headers=_headers(),
+                    )
+                except Exception as e:
+                    print(f"[{node}] failed to post result for {job_id}: {e}")
+
+            # Pick up a new pending job (one per poll cycle is fine)
+            r = httpx.get(
+                f"{CONTROLLER}/agent/jobs/{node}",
+                headers=_headers(),
+            )
+            if r.status_code == 401:
+                print(f"[{node}] token rejected by controller — node may have been revoked")
+                time.sleep(10)
+                continue
+
+            data = r.json()
+
+            if "job" in data:
+                job_id = data["job"]
+                image = data.get("image")
+                command = data.get("command")
+
+                if image:
+                    print(f"[{node}] starting job {job_id}: docker run {image} {command}")
+                else:
+                    print(f"[{node}] starting job {job_id}: shell: {command}")
+
+                t = threading.Thread(target=run_job_thread, args=(data,), daemon=True)
+                t.start()
+
+        except Exception as e:
+            print(f"[agent] error: {e}")
+
+        time.sleep(1)
+
+
+if __name__ == "__main__":
+    register()
+    loop()
+
+===== tests/test_auth.py =====
+import os
+from controller.store import (
+    init_db,
+    register_node,
+    verify_node_token,
+    revoke_node,
+    list_nodes,
+)
+
+
+def _setup(tmp_path):
+    os.chdir(tmp_path)
+    init_db(str(tmp_path / "cluster.db"))
+
+
+def test_register_returns_token(tmp_path):
+    _setup(tmp_path)
+
+    token = register_node("node1", "http://localhost:9000")
+    assert token is not None
+    assert len(token) > 0
+
+
+def test_verify_node_token_accepts_valid_token(tmp_path):
+    _setup(tmp_path)
+
+    token = register_node("node1", "http://localhost:9000")
+    assert verify_node_token("node1", token) is True
+
+
+def test_verify_node_token_rejects_wrong_token(tmp_path):
+    _setup(tmp_path)
+
+    register_node("node1", "http://localhost:9000")
+    assert verify_node_token("node1", "not-the-right-token") is False
+
+
+def test_verify_node_token_rejects_unknown_node(tmp_path):
+    _setup(tmp_path)
+
+    assert verify_node_token("ghost-node", "any-token") is False
+
+
+def test_reregister_issues_new_token(tmp_path):
+    _setup(tmp_path)
+
+    token1 = register_node("node1", "http://localhost:9000")
+    token2 = register_node("node1", "http://localhost:9000")
+
+    assert token1 != token2
+    assert verify_node_token("node1", token2) is True
+    assert verify_node_token("node1", token1) is False
+
+
+def test_revoke_invalidates_token(tmp_path):
+    _setup(tmp_path)
+
+    token = register_node("node1", "http://localhost:9000")
+    assert verify_node_token("node1", token) is True
+
+    revoke_node("node1")
+    assert verify_node_token("node1", token) is False
+
+
+def test_revoke_does_not_remove_node(tmp_path):
+    _setup(tmp_path)
+
+    register_node("node1", "http://localhost:9000")
+    revoke_node("node1")
+
+    assert "node1" in list_nodes()
+
+===== tests/test_cancel.py =====
+import os
+from controller.store import (
+    init_db,
+    register_node,
+    create_job,
+    start_job,
+    enqueue_cancel,
+    pop_cancel_jobs,
+    mark_lost,
+)
+from controller.api import reconcile_once, cancel_job
+
+
+def _setup(tmp_path):
+    os.chdir(tmp_path)
+    init_db(str(tmp_path / "cluster.db"))
+
+
+def test_enqueue_and_pop_cancel(tmp_path):
+    _setup(tmp_path)
+
+    _ = register_node("node1", "http://localhost:9000")
+    job_id = create_job("node1", "sleep 100")
+    start_job(job_id)
+
+    enqueue_cancel(job_id, "node1")
+
+    result = pop_cancel_jobs("node1")
+    assert job_id in result
+
+
+def test_pop_cancel_clears_queue(tmp_path):
+    _setup(tmp_path)
+
+    _ = register_node("node1", "http://localhost:9000")
+    job_id = create_job("node1", "sleep 100")
+    start_job(job_id)
+
+    enqueue_cancel(job_id, "node1")
+    pop_cancel_jobs("node1")
+
+    # Second pop should be empty
+    assert pop_cancel_jobs("node1") == []
+
+
+def test_pop_cancel_only_returns_for_correct_node(tmp_path):
+    _setup(tmp_path)
+
+    _ = register_node("node1", "http://localhost:9000")
+    _ = register_node("node2", "http://localhost:9001")
+    job_id = create_job("node1", "sleep 100")
+    start_job(job_id)
+
+    enqueue_cancel(job_id, "node1")
+
+    assert pop_cancel_jobs("node2") == []
+    assert job_id in pop_cancel_jobs("node1")
+
+
+def test_cancel_job_marks_lost_and_enqueues(tmp_path):
+    _setup(tmp_path)
+
+    _ = register_node("node1", "http://localhost:9000")
+    job_id = create_job("node1", "sleep 100")
+    start_job(job_id)
+
+    cancel_job(job_id, "node1")
+
+    from controller.store import list_jobs, JobStatus
+    job = list_jobs()[0]
+    assert job["status"] == JobStatus.LOST
+
+    queued = pop_cancel_jobs("node1")
+    assert job_id in queued
+
+
+def test_enqueue_multiple_cancels(tmp_path):
+    _setup(tmp_path)
+
+    _ = register_node("node1", "http://localhost:9000")
+    id1 = create_job("node1", "sleep 100")
+    id2 = create_job("node1", "sleep 100")
+    start_job(id1)
+    start_job(id2)
+
+    enqueue_cancel(id1, "node1")
+    enqueue_cancel(id2, "node1")
+
+    result = pop_cancel_jobs("node1")
+    assert set(result) == {id1, id2}
+
+
+def test_reconciler_does_not_replace_cancelled_jobs(tmp_path):
+    """Cancelled jobs are marked lost; reconciler should fill back to replica count."""
+    _setup(tmp_path)
+
+    _ = register_node("node1", "http://localhost:9000", capacity={"cpu": 4, "mem": 8192})
+    from controller.store import create_workload, count_active_workload_jobs, list_jobs
+    create_workload("workers", "sleep 100", 2)
+
+    reconcile_once()
+    assert count_active_workload_jobs("workers") == 2
+
+    # Cancel one job — reconciler should schedule a replacement
+    job_id = list_jobs()[0]["id"]
+    cancel_job(job_id, "node1")
+
+    reconcile_once()
+    assert count_active_workload_jobs("workers") == 2
+    assert len(list_jobs()) == 3  # original 2 + 1 replacement
+
+===== tests/test_jobs.py =====
+import os
+import time
+from controller.store import (
+    init_db, create_job, list_jobs, get_pending_job,
+    start_job, finish_job, mark_lost, JobStatus,
+)
+
+
+def _setup(tmp_path):
+    os.chdir(tmp_path)
+    init_db(str(tmp_path / "cluster.db"))
+
+
+def test_job_creation(tmp_path):
+    _setup(tmp_path)
+
+    jid = create_job("node1", "uptime")
+
+    jobs = list_jobs()
+    assert jobs[0]["id"] == jid
+    assert jobs[0]["command"] == "uptime"
+    assert jobs[0]["status"] == JobStatus.PENDING
+    assert jobs[0]["image"] is None
+    assert jobs[0]["workload_name"] is None
+
+
+def test_job_creation_with_image(tmp_path):
+    _setup(tmp_path)
+
+    jid = create_job("node1", "echo hello", image="alpine")
+
+    jobs = list_jobs()
+    assert jobs[0]["id"] == jid
+    assert jobs[0]["image"] == "alpine"
+
+
+def test_job_creation_with_workload_name(tmp_path):
+    _setup(tmp_path)
+
+    create_job("node1", "uptime", workload_name="workers")
+
+    assert list_jobs()[0]["workload_name"] == "workers"
+
+
+def test_job_creation_records_timestamps(tmp_path):
+    _setup(tmp_path)
+
+    before = time.time()
+    create_job("node1", "uptime")
+    after = time.time()
+
+    job = list_jobs()[0]
+    assert job["created"] is not None
+    assert job["updated"] is not None
+    assert before <= job["created"] <= after
+
+
+def test_job_lifecycle_succeeded(tmp_path):
+    _setup(tmp_path)
+
+    jid = create_job("node1", "uptime")
+
+    row = get_pending_job("node1")
+    assert row is not None
+    assert row[0] == jid
+
+    start_job(jid)
+    assert list_jobs()[0]["status"] == JobStatus.RUNNING
+
+    assert get_pending_job("node1") is None
+
+    finish_job(jid, JobStatus.SUCCEEDED, "some output")
+    job = list_jobs()[0]
+    assert job["status"] == JobStatus.SUCCEEDED
+    assert job["result"] == "some output"
+
+
+def test_job_lifecycle_failed(tmp_path):
+    _setup(tmp_path)
+
+    jid = create_job("node1", "bad-command")
+    start_job(jid)
+    finish_job(jid, JobStatus.FAILED, "command not found")
+
+    job = list_jobs()[0]
+    assert job["status"] == JobStatus.FAILED
+    assert job["result"] == "command not found"
+
+
+def test_job_lifecycle_lost(tmp_path):
+    _setup(tmp_path)
+
+    jid = create_job("node1", "uptime")
+    start_job(jid)
+    mark_lost(jid)
+
+    job = list_jobs()[0]
+    assert job["status"] == JobStatus.LOST
+
+
+def test_finish_job_normalises_finished_string(tmp_path):
+    """Agent previously sent 'finished'; ensure it still maps to succeeded."""
+    _setup(tmp_path)
+
+    jid = create_job("node1", "uptime")
+    finish_job(jid, "finished", "output")
+
+    assert list_jobs()[0]["status"] == JobStatus.SUCCEEDED
+
+
+def test_pending_job_returns_image(tmp_path):
+    _setup(tmp_path)
+
+    jid = create_job("node1", "echo hello", image="alpine")
+
+    row = get_pending_job("node1")
+    job_id, command, image = row
+    assert job_id == jid
+    assert image == "alpine"
+
+
+def test_pending_job_only_returns_for_correct_node(tmp_path):
+    _setup(tmp_path)
+
+    create_job("node1", "uptime")
+
+    assert get_pending_job("node2") is None
+    assert get_pending_job("node1") is not None
+
+
+def test_lost_job_not_counted_as_active(tmp_path):
+    _setup(tmp_path)
+
+    from controller.store import count_active_workload_jobs
+    create_job("node1", "uptime", workload_name="workers")
+    jid = create_job("node1", "uptime", workload_name="workers")
+
+    assert count_active_workload_jobs("workers") == 2
+
+    mark_lost(jid)
+    assert count_active_workload_jobs("workers") == 1
+
+
+def test_list_jobs_includes_timestamps(tmp_path):
+    _setup(tmp_path)
+
+    jid = create_job("node1", "uptime")
+    start_job(jid)
+
+    job = list_jobs()[0]
+    assert "created" in job
+    assert "updated" in job
+    assert job["created"] is not None
+    assert job["updated"] is not None
+    # updated should be >= created after start_job
+    assert job["updated"] >= job["created"]
+
+===== tests/test_logs.py =====
+import os
+from controller.store import (
+    init_db,
+    store_log,
+    get_logs,
+)
+
+def test_store_and_fetch_logs(tmp_path):
+    os.chdir(tmp_path)
+    init_db()
+
+    job_id = "job123"
+
+    store_log(job_id, "hello")
+    store_log(job_id, "world")
+
+    logs = get_logs(job_id)
+
+    assert len(logs) == 2
+    assert logs[0]["line"] == "hello"
+    assert logs[1]["line"] == "world"
+
+def test_logs_are_isolated_per_job(tmp_path):
+    os.chdir(tmp_path)
+    init_db()
+
+    store_log("job1", "from job1")
+    store_log("job2", "from job2")
+
+    assert len(get_logs("job1")) == 1
+    assert get_logs("job1")[0]["line"] == "from job1"
+    assert len(get_logs("job2")) == 1
+
+===== tests/test_nodes.py =====
+import os
+import time
+from controller.store import init_db, register_node, list_nodes, update_state
+
+
+def _setup(tmp_path):
+    os.chdir(tmp_path)
+    init_db(str(tmp_path / "cluster.db"))
+
+
+def test_node_registration(tmp_path):
+    _setup(tmp_path)
+
+    _ = register_node(
+        "node1",
+        "http://localhost:9000",
+        {"region": "eu"},
+        {"cpu": 4, "mem": 8192},
+    )
+
+    nodes = list_nodes()
+    assert "node1" in nodes
+    assert nodes["node1"]["labels"]["region"] == "eu"
+    assert nodes["node1"]["capacity"]["cpu"] == 4
+    assert nodes["node1"]["healthy"] is True
+
+
+def test_node_registration_without_labels(tmp_path):
+    _setup(tmp_path)
+
+    _ = register_node("node1", "http://localhost:9000")
+
+    nodes = list_nodes()
+    assert nodes["node1"]["labels"] == {}
+    assert nodes["node1"]["capacity"] == {}
+
+
+def test_node_replace_on_reregister(tmp_path):
+    _setup(tmp_path)
+
+    _ = register_node("node1", "http://localhost:9000", labels={"region": "eu"})
+    _ = register_node("node1", "http://localhost:9000", labels={"region": "us"})
+
+    nodes = list_nodes()
+    assert len(nodes) == 1
+    assert nodes["node1"]["labels"]["region"] == "us"
+
+
+def test_update_state_marks_healthy(tmp_path):
+    _setup(tmp_path)
+
+    _ = register_node("node1", "http://localhost:9000")
+    update_state("node1", {"node": "node1", "cpu": 0.3, "mem": 0.5, "disk_free": 0.8})
+
+    nodes = list_nodes()
+    assert nodes["node1"]["healthy"] is True
+    assert nodes["node1"]["state"]["cpu"] == 0.3
+
+
+def test_update_state_marks_unhealthy_on_high_cpu(tmp_path):
+    _setup(tmp_path)
+
+    _ = register_node("node1", "http://localhost:9000")
+    update_state("node1", {"node": "node1", "cpu": 0.95, "mem": 0.5, "disk_free": 0.8})
+
+    nodes = list_nodes()
+    assert nodes["node1"]["healthy"] is False
+
+
+def test_update_state_marks_unhealthy_on_high_mem(tmp_path):
+    _setup(tmp_path)
+
+    _ = register_node("node1", "http://localhost:9000")
+    update_state("node1", {"node": "node1", "cpu": 0.3, "mem": 0.95, "disk_free": 0.8})
+
+    nodes = list_nodes()
+    assert nodes["node1"]["healthy"] is False
+
+
+def test_last_seen_is_updated(tmp_path):
+    _setup(tmp_path)
+
+    _ = register_node("node1", "http://localhost:9000")
+    before = time.time()
+    update_state("node1", {"node": "node1", "cpu": 0.1, "mem": 0.1, "disk_free": 0.9})
+    after = time.time()
+
+    nodes = list_nodes()
+    assert before <= nodes["node1"]["last_seen"] <= after
+
+===== tests/test_reconcile.py =====
+import os
+
+from controller.store import (
+    init_db,
+    create_workload,
+    register_node,
+    list_jobs,
+    count_active_workload_jobs,
+    mark_lost,
+    JobStatus,
+)
+from controller.api import reconcile_once
+
+
+def _setup(tmp_path):
+    os.chdir(tmp_path)
+    init_db(str(tmp_path / "cluster.db"))
+
+
+def test_reconcile_creates_correct_replica_count(tmp_path):
+    _setup(tmp_path)
+
+    register_node("node1", "http://localhost:9000", capacity={"cpu": 4, "mem": 8192})
+    create_workload("workers", "uptime", 3)
+
+    reconcile_once()
+
+    jobs = list_jobs()
+    assert len(jobs) == 3
+    assert all(j["workload_name"] == "workers" for j in jobs)
+
+
+def test_reconcile_is_idempotent(tmp_path):
+    _setup(tmp_path)
+
+    register_node("node1", "http://localhost:9000", capacity={"cpu": 4, "mem": 8192})
+    create_workload("workers", "uptime", 3)
+
+    reconcile_once()
+    reconcile_once()
+
+    assert len(list_jobs()) == 3
+
+
+def test_reconcile_two_workloads_dont_interfere(tmp_path):
+    _setup(tmp_path)
+
+    register_node("node1", "http://localhost:9000", capacity={"cpu": 4, "mem": 8192})
+    create_workload("workers", "uptime", 2)
+    create_workload("checkers", "uptime", 1)
+
+    reconcile_once()
+
+    assert count_active_workload_jobs("workers") == 2
+    assert count_active_workload_jobs("checkers") == 1
+
+
+def test_reconcile_respects_label_constraints(tmp_path):
+    _setup(tmp_path)
+
+    register_node("eu-node", "http://localhost:9000", labels={"region": "eu"}, capacity={"cpu": 4, "mem": 8192})
+    register_node("us-node", "http://localhost:9001", labels={"region": "us"}, capacity={"cpu": 4, "mem": 8192})
+
+    create_workload("eu-workers", "uptime", 2, constraints={"region": "eu"})
+
+    reconcile_once()
+
+    jobs = list_jobs()
+    assert len(jobs) == 2
+    assert all(j["node"] == "eu-node" for j in jobs)
+
+
+def test_reconcile_skips_when_no_matching_node(tmp_path):
+    _setup(tmp_path)
+
+    register_node("us-node", "http://localhost:9001", labels={"region": "us"}, capacity={"cpu": 4, "mem": 8192})
+    create_workload("eu-workers", "uptime", 2, constraints={"region": "eu"})
+
+    reconcile_once()
+
+    assert list_jobs() == []
+
+
+def test_reconcile_docker_workload_passes_image(tmp_path):
+    _setup(tmp_path)
+
+    register_node("node1", "http://localhost:9000", capacity={"cpu": 4, "mem": 8192})
+    create_workload("containers", "echo hello", 2, image="alpine")
+
+    reconcile_once()
+
+    jobs = list_jobs()
+    assert len(jobs) == 2
+    assert all(j["image"] == "alpine" for j in jobs)
+
+
+def test_reconcile_replaces_lost_jobs(tmp_path):
+    """Lost jobs should not count as active, so reconciler creates replacements."""
+    _setup(tmp_path)
+
+    register_node("node1", "http://localhost:9000", capacity={"cpu": 4, "mem": 8192})
+    create_workload("workers", "uptime", 2)
+
+    reconcile_once()
+    assert len(list_jobs()) == 2
+
+    # Mark one job as lost
+    lost_id = list_jobs()[0]["id"]
+    mark_lost(lost_id)
+
+    reconcile_once()
+
+    active = count_active_workload_jobs("workers")
+    assert active == 2
+    assert len(list_jobs()) == 3  # 2 original + 1 replacement
+
+===== tests/test_scale.py =====
+import os
+
+from controller.store import (
+    init_db,
+    create_workload,
+    create_job,
+    start_job,
+    register_node,
+    list_jobs,
+    count_active_workload_jobs,
+    update_workload_replicas,
+    get_excess_workload_jobs,
+    list_workloads,
+    JobStatus,
+)
+from controller.api import reconcile_once
+
+
+def _setup(tmp_path):
+    os.chdir(tmp_path)
+    init_db(str(tmp_path / "cluster.db"))
+
+
+def test_update_workload_replicas(tmp_path):
+    _setup(tmp_path)
+
+    create_workload("workers", "uptime", 3)
+    updated = update_workload_replicas("workers", 1)
+
+    assert updated is True
+    assert list_workloads()[0]["replicas"] == 1
+
+
+def test_update_workload_replicas_returns_false_when_not_found(tmp_path):
+    _setup(tmp_path)
+
+    result = update_workload_replicas("nonexistent", 1)
+    assert result is False
+
+
+def test_get_excess_workload_jobs_returns_empty_when_within_target(tmp_path):
+    _setup(tmp_path)
+
+    create_workload("workers", "uptime", 3)
+    create_job("node1", "uptime", workload_name="workers")
+    create_job("node1", "uptime", workload_name="workers")
+
+    excess = get_excess_workload_jobs("workers", 3)
+    assert excess == []
+
+
+def test_get_excess_workload_jobs_returns_correct_count(tmp_path):
+    _setup(tmp_path)
+
+    create_workload("workers", "uptime", 3)
+    create_job("node1", "uptime", workload_name="workers")
+    create_job("node1", "uptime", workload_name="workers")
+    create_job("node1", "uptime", workload_name="workers")
+
+    excess = get_excess_workload_jobs("workers", 1)
+    assert len(excess) == 2
+
+
+def test_get_excess_workload_jobs_prefers_pending_over_running(tmp_path):
+    """Pending jobs should be cancelled before running ones."""
+    _setup(tmp_path)
+
+    create_workload("workers", "uptime", 3)
+    running_id = create_job("node1", "uptime", workload_name="workers")
+    pending_id = create_job("node1", "uptime", workload_name="workers")
+    start_job(running_id)
+
+    # Scale to 1 — one job should be cancelled, prefer the pending one
+    excess = get_excess_workload_jobs("workers", 1)
+    assert len(excess) == 1
+    assert excess[0][0] == pending_id
+
+
+def test_scale_down_marks_excess_jobs_lost(tmp_path):
+    _setup(tmp_path)
+
+    register_node("node1", "http://localhost:9000", capacity={"cpu": 4, "mem": 8192})
+    create_workload("workers", "uptime", 3)
+    reconcile_once()
+
+    assert count_active_workload_jobs("workers") == 3
+
+    # Scale down to 1
+    update_workload_replicas("workers", 1)
+    excess = get_excess_workload_jobs("workers", 1)
+    from controller.store import mark_lost
+    for job_id, node_id in excess:
+        mark_lost(job_id)
+
+    assert count_active_workload_jobs("workers") == 1
+    lost_jobs = [j for j in list_jobs() if j["status"] == JobStatus.LOST]
+    assert len(lost_jobs) == 2
+
+
+def test_scale_down_reconciler_does_not_replace_excess(tmp_path):
+    """After scaling down, reconciler should not schedule replacements for lost jobs."""
+    _setup(tmp_path)
+
+    register_node("node1", "http://localhost:9000", capacity={"cpu": 4, "mem": 8192})
+    create_workload("workers", "uptime", 3)
+    reconcile_once()
+
+    assert count_active_workload_jobs("workers") == 3
+
+    update_workload_replicas("workers", 1)
+    excess = get_excess_workload_jobs("workers", 1)
+    from controller.store import mark_lost
+    for job_id, node_id in excess:
+        mark_lost(job_id)
+
+    reconcile_once()
+
+    assert count_active_workload_jobs("workers") == 1
+    assert len(list_jobs()) == 3  # no new jobs created
+
+
+def test_scale_up_reconciler_creates_new_jobs(tmp_path):
+    _setup(tmp_path)
+
+    register_node("node1", "http://localhost:9000", capacity={"cpu": 4, "mem": 8192})
+    create_workload("workers", "uptime", 1)
+    reconcile_once()
+
+    assert count_active_workload_jobs("workers") == 1
+
+    update_workload_replicas("workers", 3)
+    reconcile_once()
+
+    assert count_active_workload_jobs("workers") == 3
+
+
+def test_scale_to_zero_cancels_all_jobs(tmp_path):
+    _setup(tmp_path)
+
+    register_node("node1", "http://localhost:9000", capacity={"cpu": 4, "mem": 8192})
+    create_workload("workers", "uptime", 3)
+    reconcile_once()
+
+    assert count_active_workload_jobs("workers") == 3
+
+    update_workload_replicas("workers", 0)
+    excess = get_excess_workload_jobs("workers", 0)
+    from controller.store import mark_lost
+    for job_id, node_id in excess:
+        mark_lost(job_id)
+
+    assert count_active_workload_jobs("workers") == 0
+    reconcile_once()
+    assert count_active_workload_jobs("workers") == 0
+
+===== tests/test_scheduler.py =====
+import os
+import time
+from controller.store import init_db, register_node, update_state, create_job, start_job, JobStatus
+from controller.api import pick_node
+
+
+def _setup(tmp_path):
+    os.chdir(tmp_path)
+    init_db(str(tmp_path / "cluster.db"))
+
+
+def _nodes():
+    from controller.store import list_nodes
+    return list_nodes()
+
+
+def test_pick_node_returns_healthy_node(tmp_path):
+    _setup(tmp_path)
+
+    register_node("node1", "http://localhost:9000")
+    update_state("node1", {"cpu": 0.3, "mem": 0.4})
+
+    node = pick_node(_nodes(), {}, {})
+    assert node == "node1"
+
+
+def test_pick_node_excludes_unhealthy_node(tmp_path):
+    _setup(tmp_path)
+
+    register_node("node1", "http://localhost:9000")
+    update_state("node1", {"cpu": 0.95, "mem": 0.4})  # unhealthy
+
+    node = pick_node(_nodes(), {}, {})
+    assert node is None
+
+
+def test_pick_node_excludes_stale_node(tmp_path):
+    _setup(tmp_path)
+
+    register_node("node1", "http://localhost:9000")
+    from controller.store import get_db, _db_lock
+    import json
+    with _db_lock:
+        get_db().execute(
+            "UPDATE nodes SET state_json=?, last_seen=?, healthy=1 WHERE id=?",
+            (json.dumps({"cpu": 0.1, "mem": 0.1}), time.time() - 60, "node1")
+        )
+        get_db().commit()
+
+    node = pick_node(_nodes(), {}, {})
+    assert node is None
+
+
+def test_pick_node_respects_label_constraints(tmp_path):
+    _setup(tmp_path)
+
+    register_node("eu-node", "http://localhost:9000", labels={"region": "eu"})
+    register_node("us-node", "http://localhost:9001", labels={"region": "us"})
+    update_state("eu-node", {"cpu": 0.3, "mem": 0.4})
+    update_state("us-node", {"cpu": 0.3, "mem": 0.4})
+
+    node = pick_node(_nodes(), {"region": "eu"}, {})
+    assert node == "eu-node"
+
+
+def test_pick_node_returns_none_when_no_label_match(tmp_path):
+    _setup(tmp_path)
+
+    register_node("us-node", "http://localhost:9001", labels={"region": "us"})
+    update_state("us-node", {"cpu": 0.3, "mem": 0.4})
+
+    node = pick_node(_nodes(), {"region": "eu"}, {})
+    assert node is None
+
+
+def test_pick_node_selects_least_loaded_by_cpu(tmp_path):
+    """When job counts are equal, the node with lower CPU is preferred."""
+    _setup(tmp_path)
+
+    register_node("busy-node", "http://localhost:9000")
+    register_node("idle-node", "http://localhost:9001")
+    update_state("busy-node", {"cpu": 0.8, "mem": 0.4})
+    update_state("idle-node", {"cpu": 0.1, "mem": 0.4})
+
+    node = pick_node(_nodes(), {}, {})
+    assert node == "idle-node"
+
+
+def test_pick_node_prefers_node_with_fewer_jobs(tmp_path):
+    """Job count takes priority over CPU when nodes differ in active jobs."""
+    _setup(tmp_path)
+
+    register_node("loaded-node", "http://localhost:9000")
+    register_node("free-node", "http://localhost:9001")
+    # loaded-node reports lower CPU but has more active jobs
+    update_state("loaded-node", {"cpu": 0.1, "mem": 0.4})
+    update_state("free-node", {"cpu": 0.5, "mem": 0.4})
+
+    # Assign two active jobs to loaded-node
+    jid1 = create_job("loaded-node", "sleep 100")
+    jid2 = create_job("loaded-node", "sleep 100")
+    start_job(jid1)
+    start_job(jid2)
+
+    node = pick_node(_nodes(), {}, {})
+    assert node == "free-node"
+
+
+def test_pick_node_returns_none_with_no_nodes(tmp_path):
+    _setup(tmp_path)
+
+    node = pick_node({}, {}, {})
+    assert node is None
+

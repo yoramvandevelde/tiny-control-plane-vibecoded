@@ -24,6 +24,15 @@ _running_lock = threading.Lock()
 # Set after successful registration
 _node_token: str | None = None
 
+# Set to True if the controller rejects our token — triggers clean exit
+_revoked = False
+
+
+def _handle_revocation():
+    print(f"[{node}] node token rejected by controller — this node has been revoked")
+    print(f"[{node}] shutting down; restart the agent to re-register")
+    sys.exit(1)
+
 # Map of job_id -> subprocess.Popen (shell) or container_id str (docker)
 _processes: dict = {}
 _processes_lock = threading.Lock()
@@ -227,11 +236,13 @@ def loop():
 
     while True:
         try:
-            httpx.post(
+            r = httpx.post(
                 f"{CONTROLLER}/state",
                 json=state(),
                 headers=_headers(),
             )
+            if r.status_code == 401:
+                _handle_revocation()
 
             # Send heartbeats on interval
             now = time.time()
@@ -271,9 +282,7 @@ def loop():
                 headers=_headers(),
             )
             if r.status_code == 401:
-                print(f"[{node}] token rejected by controller — node may have been revoked")
-                time.sleep(10)
-                continue
+                _handle_revocation()
 
             data = r.json()
 
