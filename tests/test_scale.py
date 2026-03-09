@@ -73,7 +73,7 @@ def test_get_excess_workload_jobs_prefers_pending_over_running(tmp_path):
     # Scale to 1 — one job should be cancelled, prefer the pending one
     excess = get_excess_workload_jobs("workers", 1)
     assert len(excess) == 1
-    assert excess[0] == pending_id
+    assert excess[0][0] == pending_id
 
 
 def test_scale_down_marks_excess_jobs_lost(tmp_path):
@@ -89,7 +89,7 @@ def test_scale_down_marks_excess_jobs_lost(tmp_path):
     update_workload_replicas("workers", 1)
     excess = get_excess_workload_jobs("workers", 1)
     from controller.store import mark_lost
-    for job_id in excess:
+    for job_id, node_id in excess:
         mark_lost(job_id)
 
     assert count_active_workload_jobs("workers") == 1
@@ -110,7 +110,7 @@ def test_scale_down_reconciler_does_not_replace_excess(tmp_path):
     update_workload_replicas("workers", 1)
     excess = get_excess_workload_jobs("workers", 1)
     from controller.store import mark_lost
-    for job_id in excess:
+    for job_id, node_id in excess:
         mark_lost(job_id)
 
     reconcile_once()
@@ -146,7 +146,7 @@ def test_scale_to_zero_cancels_all_jobs(tmp_path):
     update_workload_replicas("workers", 0)
     excess = get_excess_workload_jobs("workers", 0)
     from controller.store import mark_lost
-    for job_id in excess:
+    for job_id, node_id in excess:
         mark_lost(job_id)
 
     assert count_active_workload_jobs("workers") == 0

@@ -87,6 +87,14 @@ def init_db(path=None):
     )
     """)
 
+    db.execute("""
+    CREATE TABLE IF NOT EXISTS cancel_jobs (
+        job_id TEXT PRIMARY KEY,
+        node_id TEXT,
+        created REAL
+    )
+    """)
+
     db.commit()
 
 
@@ -293,13 +301,13 @@ def count_active_workload_jobs(workload_name):
 
 def get_excess_workload_jobs(workload_name, keep):
     """
-    Return job IDs for active jobs beyond the desired replica count.
+    Return (job_id, node_id) tuples for active jobs beyond the desired replica count.
     Prefers to mark pending jobs lost before running ones.
     """
     placeholders = ",".join("?" * len(JobStatus.ACTIVE))
     rows = get_db().execute(
         f"""
-        SELECT id, status FROM jobs
+        SELECT id, node_id, status FROM jobs
         WHERE workload_name=? AND status IN ({placeholders})
         ORDER BY
             CASE status WHEN 'pending' THEN 0 ELSE 1 END,
@@ -311,7 +319,7 @@ def get_excess_workload_jobs(workload_name, keep):
     excess = len(rows) - keep
     if excess <= 0:
         return []
-    return [r[0] for r in rows[:excess]]
+    return [(r[0], r[1]) for r in rows[:excess]]
 
 
 def update_workload_replicas(name, replicas):
@@ -356,6 +364,34 @@ def list_workloads():
         }
         for r in rows
     ]
+
+
+def enqueue_cancel(job_id, node_id):
+    """Record that a job should be cancelled on its node."""
+    with _db_lock:
+        get_db().execute(
+            "INSERT OR REPLACE INTO cancel_jobs(job_id, node_id, created) VALUES (?,?,?)",
+            (job_id, node_id, time.time()),
+        )
+        get_db().commit()
+
+
+def pop_cancel_jobs(node_id):
+    """Return and remove all pending cancellations for a node."""
+    with _db_lock:
+        rows = get_db().execute(
+            "SELECT job_id FROM cancel_jobs WHERE node_id=?",
+            (node_id,)
+        ).fetchall()
+        if rows:
+            placeholders = ",".join("?" * len(rows))
+            job_ids = [r[0] for r in rows]
+            get_db().execute(
+                f"DELETE FROM cancel_jobs WHERE job_id IN ({placeholders})",
+                job_ids,
+            )
+            get_db().commit()
+    return [r[0] for r in rows]
 
 
 def store_log(job_id, line):

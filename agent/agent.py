@@ -1,4 +1,4 @@
-import socket, psutil, httpx, subprocess, argparse, time, threading, queue, os, sys
+import socket, psutil, httpx, subprocess, argparse, time, threading, queue, os, sys, signal
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--node-id", default=socket.gethostname())
@@ -23,6 +23,10 @@ _running_lock = threading.Lock()
 
 # Set after successful registration
 _node_token: str | None = None
+
+# Map of job_id -> subprocess.Popen (shell) or container_id str (docker)
+_processes: dict = {}
+_processes_lock = threading.Lock()
 
 
 def _headers() -> dict:
@@ -73,34 +77,66 @@ def register():
     print(f"[agent] registered as {node}")
 
 
-def run_shell(command: str) -> str:
-    return subprocess.check_output(
+def run_shell(command: str) -> tuple[subprocess.Popen, str]:
+    proc = subprocess.Popen(
         command,
         shell=True,
+        stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-    ).decode()
+    )
+    out, _ = proc.communicate()
+    return proc, out.decode()
 
 
-def run_docker(image: str, command: str) -> str:
-    cmd = ["docker", "run", "--rm", "--network", "none", image]
+def run_docker(image: str, command: str) -> tuple[str, str]:
+    """Returns (container_id, output)."""
+    # Use --cidfile to capture the container ID for later cancellation
+    import tempfile
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".cid") as f:
+        cidfile = f.name
+
+    cmd = ["docker", "run", "--rm", "--network", "none", f"--cidfile={cidfile}", image]
     if command:
         cmd += command.split()
 
-    return subprocess.check_output(
-        cmd,
-        stderr=subprocess.STDOUT,
-    ).decode()
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        out, _ = proc.communicate()
+        try:
+            container_id = open(cidfile).read().strip()
+        except Exception:
+            container_id = ""
+        return container_id, out.decode(), proc.returncode
+    finally:
+        try:
+            os.unlink(cidfile)
+        except Exception:
+            pass
 
 
 def execute(job: dict) -> tuple[str, str]:
+    job_id = job["job"]
     try:
         if job.get("image"):
-            out = run_docker(job["image"], job["command"])
+            container_id, out, returncode = run_docker(job["image"], job["command"])
+            with _processes_lock:
+                _processes[job_id] = ("docker", container_id)
+            if returncode != 0:
+                return STATUS_FAILED, out
+            return STATUS_SUCCEEDED, out
         else:
-            out = run_shell(job["command"])
-        return STATUS_SUCCEEDED, out
-    except subprocess.CalledProcessError as e:
-        return STATUS_FAILED, e.output.decode() if e.output else str(e)
+            proc, out = run_shell(job["command"])
+            with _processes_lock:
+                _processes[job_id] = ("shell", proc)
+            if proc.returncode != 0:
+                return STATUS_FAILED, out
+            return STATUS_SUCCEEDED, out
+    except Exception as e:
+        return STATUS_FAILED, str(e)
 
 
 def send_logs(job_id: str, output: str):
@@ -133,6 +169,8 @@ def run_job_thread(job: dict):
     finally:
         with _running_lock:
             _running_jobs.discard(job_id)
+        with _processes_lock:
+            _processes.pop(job_id, None)
 
 
 def send_heartbeats():
@@ -152,6 +190,38 @@ def send_heartbeats():
             pass
 
 
+def kill_job(job_id: str):
+    """Terminate a running job by job_id. SIGTERM first, SIGKILL if still alive."""
+    with _processes_lock:
+        entry = _processes.pop(job_id, None)
+
+    if entry is None:
+        return
+
+    kind, handle = entry
+
+    if kind == "shell":
+        proc = handle
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        except Exception as e:
+            print(f"[{node}] failed to kill shell job {job_id}: {e}")
+
+    elif kind == "docker":
+        container_id = handle
+        if container_id:
+            try:
+                subprocess.run(["docker", "stop", container_id], timeout=10)
+            except Exception as e:
+                print(f"[{node}] failed to stop container {container_id}: {e}")
+
+    print(f"[{node}] cancelled job {job_id}")
+
+
 def loop():
     last_heartbeat = 0.0
 
@@ -168,6 +238,19 @@ def loop():
             if now - last_heartbeat >= HEARTBEAT_INTERVAL:
                 send_heartbeats()
                 last_heartbeat = now
+
+            # Check for cancellation requests
+            try:
+                r = httpx.get(
+                    f"{CONTROLLER}/agent/cancel/{node}",
+                    headers=_headers(),
+                    timeout=2,
+                )
+                for job_id in r.json().get("cancel", []):
+                    print(f"[{node}] received cancel for job {job_id}")
+                    kill_job(job_id)
+            except Exception:
+                pass
 
             # Drain completed jobs and post results
             while not _results.empty():

@@ -19,6 +19,8 @@ from controller.store import (
     mark_lost,
     renew_lease,
     expire_lost_jobs,
+    enqueue_cancel,
+    pop_cancel_jobs,
     create_workload,
     list_workloads,
     count_active_workload_jobs,
@@ -39,6 +41,12 @@ def get_bootstrap_token() -> str:
     if not token:
         raise RuntimeError("TCP_BOOTSTRAP_TOKEN environment variable is not set")
     return token
+
+
+def cancel_job(job_id: str, node_id: str):
+    """Mark a job lost and enqueue a cancellation signal for the agent."""
+    mark_lost(job_id)
+    enqueue_cancel(job_id, node_id)
 
 
 def require_agent_auth(node_id: str, x_node_token: str | None):
@@ -196,6 +204,12 @@ def agent_log(data: dict, x_node_token: str | None = Header(None)):
     return {"ok": True}
 
 
+@app.get("/agent/cancel/{node}")
+def agent_cancel(node: str, x_node_token: str | None = Header(None)):
+    require_agent_auth(node, x_node_token)
+    return {"cancel": pop_cancel_jobs(node)}
+
+
 @app.delete("/nodes/{node_id}")
 def revoke(node_id: str):
     revoke_node(node_id)
@@ -228,8 +242,8 @@ def scale_workload(name: str, data: dict):
         raise HTTPException(status_code=404, detail="workload not found")
 
     excess = get_excess_workload_jobs(name, replicas)
-    for job_id in excess:
-        mark_lost(job_id)
+    for job_id, node_id in excess:
+        cancel_job(job_id, node_id)
 
     return {"ok": True, "replicas": replicas, "cancelled": len(excess)}
 
