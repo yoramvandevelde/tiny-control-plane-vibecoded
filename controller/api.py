@@ -1,21 +1,66 @@
 
 from fastapi import FastAPI
 import asyncio
-from controller.store import *
-
-app = FastAPI()
-
+import time
 from contextlib import asynccontextmanager
+from controller.store import (
+    init_db,
+    register_node,
+    update_state,
+    list_nodes,
+    create_job,
+    list_jobs,
+    get_pending_job,
+    start_job,
+    finish_job,
+    create_workload,
+    list_workloads,
+    count_active_workload_jobs,
+)
+
+NODE_STALE_SECONDS = 30
+
+
+def pick_node(nodes: dict, constraints: dict, resources: dict) -> str | None:
+    """
+    Select a node using:
+    1. Only healthy, recently-seen nodes
+    2. Label constraint matching
+    3. Least-loaded (by CPU) among candidates — simple binpacking proxy
+    """
+    now = time.time()
+    candidates = []
+
+    for node_id, info in nodes.items():
+        if not info["healthy"]:
+            continue
+
+        if now - (info.get("last_seen") or 0) > NODE_STALE_SECONDS:
+            continue
+
+        labels = info.get("labels", {})
+        if not all(labels.get(k) == v for k, v in constraints.items()):
+            continue
+
+        cpu_used = info.get("state", {}).get("cpu", 0)
+        candidates.append((cpu_used, node_id))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x[0])
+    return candidates[0][1]
+
 
 @asynccontextmanager
 async def lifespan(app):
-
     init_db()
     asyncio.create_task(reconcile_loop())
-
     yield
 
+
 app = FastAPI(lifespan=lifespan)
+
 
 @app.post("/register")
 def register(data: dict):
@@ -47,7 +92,6 @@ def jobs():
 
 @app.get("/agent/jobs/{node}")
 def agent_job(node: str):
-
     job = get_pending_job(node)
 
     if not job:
@@ -67,32 +111,39 @@ def agent_result(data: dict):
 
 @app.post("/workloads")
 def workload(data: dict):
-    create_workload(data["name"], data["command"], data["replicas"])
+    create_workload(
+        data["name"],
+        data["command"],
+        data["replicas"],
+        data.get("constraints"),
+        data.get("resources"),
+    )
     return {"ok": True}
+
+
+@app.get("/workloads")
+def workloads():
+    return list_workloads()
 
 
 async def reconcile_loop():
     while True:
+        try:
+            workloads = list_workloads()
+            nodes = list_nodes()
 
-        workloads = list_workloads()
-        jobs = list_jobs()
+            for w in workloads:
+                running = count_active_workload_jobs(w["name"])
+                missing = w["replicas"] - running
 
-        for w in workloads:
+                for _ in range(missing):
+                    node_id = pick_node(nodes, w.get("constraints", {}), w.get("resources", {}))
+                    if node_id is None:
+                        break
+                    create_job(node_id, w["command"], workload_name=w["name"])
 
-            running = 0
-
-            for j in jobs:
-                if j["command"] == w["command"] and j["status"] != "finished":
-                    running += 1
-
-            missing = w["replicas"] - running
-
-            for _ in range(missing):
-                nodes = list_nodes()
-                if not nodes:
-                    continue
-
-                node = list(nodes.keys())[0]
-                create_job(node, w["command"])
+        except Exception as e:
+            # Log but don't crash the loop
+            print(f"[reconcile] error: {e}")
 
         await asyncio.sleep(5)
