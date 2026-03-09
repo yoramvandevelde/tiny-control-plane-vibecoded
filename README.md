@@ -35,6 +35,7 @@ Somehow, this still resulted in:
 * job leases and lost job detection
 * a CLI that tells you what is actually happening
 * scaling workloads up and down
+* per-node authentication and revocation
 
 Which is suspiciously close to a real orchestrator.
 
@@ -87,6 +88,14 @@ on the agent, but the controller stops pretending they count.
 > "Desired state is easy to declare.
 > Undesiring state is where it gets interesting."
 
+Then someone asked: "what stops a rogue agent from impersonating a node?"
+It turned out the answer was: nothing. Every agent could talk to the controller
+freely. We added a bootstrap token for registration and per-node tokens for
+everything else.
+
+> "We built a distributed system and forgot to lock the front door.
+> In our defense, so did Kubernetes. They just had more time before anyone noticed."
+
 ---
 
 # Architecture
@@ -113,6 +122,36 @@ The controller:
 ---
 
 # Features
+
+### Authentication
+
+The controller uses a two-token system.
+
+**Bootstrap token** — a shared secret configured via the `TCP_BOOTSTRAP_TOKEN`
+environment variable on both the controller and each agent. Used only for the
+initial registration request. If it is wrong or missing, the agent exits
+immediately rather than running unauthenticated.
+
+**Node token** — a UUID issued by the controller on successful registration.
+The agent stores it in memory and sends it as `X-Node-Token` on every
+subsequent request. Each node gets its own token, so a single node can be
+revoked without affecting the others.
+
+To revoke a node:
+
+```bash
+python cli/tcp.py revoke node1
+```
+
+The node's next request will receive a 401. It logs the rejection and backs
+off for 10 seconds rather than crashing — crashing would lose any in-memory
+job state. Re-registering issues a fresh token; the old one is immediately
+invalid.
+
+> "We added authentication after building the entire orchestrator.
+> To be fair, so did everyone else."
+
+---
 
 ### Node Registration
 
@@ -330,6 +369,12 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
+Set the bootstrap token (required on both controller and agent):
+
+```bash
+export TCP_BOOTSTRAP_TOKEN=your-secret-here
+```
+
 Start controller:
 
 ```bash
@@ -341,6 +386,12 @@ Start agents:
 ```bash
 python agent/agent.py --node-id node1 --port 9000
 python agent/agent.py --node-id node2 --port 9001
+```
+
+Agents can also register with labels:
+
+```bash
+python agent/agent.py --node-id node1 --port 9000 --label region=eu
 ```
 
 View nodes:
@@ -395,6 +446,12 @@ Scale a workload:
 
 ```bash
 python cli/tcp.py scale workers 1
+```
+
+Revoke a node:
+
+```bash
+python cli/tcp.py revoke node1
 ```
 
 Show job status with elapsed times:
@@ -495,3 +552,7 @@ actually doing?" and the honest answer was "we have no idea, here is some JSON."
 
 Do not tell them scaling down marks jobs as `lost` while they keep running.
 The state is correct. The process is uninformed.
+
+Do not tell them we built the entire system before adding authentication.
+The bootstrap token was always part of the plan.
+We just forgot to write it down until someone asked.

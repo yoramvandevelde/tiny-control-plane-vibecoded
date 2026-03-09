@@ -1,5 +1,5 @@
-
-from fastapi import FastAPI
+import os
+from fastapi import FastAPI, Header, HTTPException
 import asyncio
 import random
 import time
@@ -7,6 +7,8 @@ from contextlib import asynccontextmanager
 from controller.store import (
     init_db,
     register_node,
+    verify_node_token,
+    revoke_node,
     update_state,
     list_nodes,
     create_job,
@@ -30,6 +32,19 @@ from controller.store import (
 )
 
 NODE_STALE_SECONDS = 30
+
+
+def get_bootstrap_token() -> str:
+    token = os.environ.get("TCP_BOOTSTRAP_TOKEN", "")
+    if not token:
+        raise RuntimeError("TCP_BOOTSTRAP_TOKEN environment variable is not set")
+    return token
+
+
+def require_agent_auth(node_id: str, x_node_token: str | None):
+    """Raise 401 if the node token is missing or invalid."""
+    if not x_node_token or not verify_node_token(node_id, x_node_token):
+        raise HTTPException(status_code=401, detail="invalid or missing node token")
 
 
 def pick_node(nodes: dict, constraints: dict, resources: dict) -> str | None:
@@ -111,13 +126,21 @@ app = FastAPI(lifespan=lifespan)
 
 
 @app.post("/register")
-def register(data: dict):
-    register_node(data["node"], data["address"], data.get("labels"), data.get("capacity"))
-    return {"ok": True}
+def register(data: dict, x_bootstrap_token: str | None = Header(None)):
+    if x_bootstrap_token != get_bootstrap_token():
+        raise HTTPException(status_code=401, detail="invalid bootstrap token")
+    token = register_node(
+        data["node"],
+        data["address"],
+        data.get("labels"),
+        data.get("capacity"),
+    )
+    return {"ok": True, "token": token}
 
 
 @app.post("/state")
-def state(data: dict):
+def state(data: dict, x_node_token: str | None = Header(None)):
+    require_agent_auth(data["node"], x_node_token)
     update_state(data["node"], data)
     return {"ok": True}
 
@@ -139,7 +162,8 @@ def jobs():
 
 
 @app.get("/agent/jobs/{node}")
-def agent_job(node: str):
+def agent_job(node: str, x_node_token: str | None = Header(None)):
+    require_agent_auth(node, x_node_token)
     job = get_pending_job(node)
 
     if not job:
@@ -152,14 +176,29 @@ def agent_job(node: str):
 
 
 @app.post("/agent/heartbeat/{job_id}")
-def agent_heartbeat(job_id: str):
+def agent_heartbeat(job_id: str, data: dict, x_node_token: str | None = Header(None)):
+    require_agent_auth(data["node"], x_node_token)
     renew_lease(job_id)
     return {"ok": True}
 
 
 @app.post("/agent/result")
-def agent_result(data: dict):
+def agent_result(data: dict, x_node_token: str | None = Header(None)):
+    require_agent_auth(data["node"], x_node_token)
     finish_job(data["job"], data["status"], data["result"])
+    return {"ok": True}
+
+
+@app.post("/agent/log")
+def agent_log(data: dict, x_node_token: str | None = Header(None)):
+    require_agent_auth(data["node"], x_node_token)
+    store_log(data["job"], data["line"])
+    return {"ok": True}
+
+
+@app.delete("/nodes/{node_id}")
+def revoke(node_id: str):
+    revoke_node(node_id)
     return {"ok": True}
 
 
@@ -186,7 +225,6 @@ def scale_workload(name: str, data: dict):
     replicas = data["replicas"]
     updated = update_workload_replicas(name, replicas)
     if not updated:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="workload not found")
 
     excess = get_excess_workload_jobs(name, replicas)
@@ -199,12 +237,6 @@ def scale_workload(name: str, data: dict):
 @app.delete("/workloads/{name}")
 def remove_workload(name: str):
     delete_workload(name)
-    return {"ok": True}
-
-
-@app.post("/agent/log")
-def agent_log(data: dict):
-    store_log(data["job"], data["line"])
     return {"ok": True}
 
 

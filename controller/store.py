@@ -1,4 +1,3 @@
-
 import sqlite3, json, time, uuid, threading
 
 _local = threading.local()
@@ -46,7 +45,8 @@ def init_db(path=None):
         capacity TEXT,
         healthy INTEGER,
         last_seen REAL,
-        state_json TEXT
+        state_json TEXT,
+        token TEXT
     )
     """)
 
@@ -91,9 +91,10 @@ def init_db(path=None):
 
 
 def register_node(node_id, address, labels=None, capacity=None):
+    token = str(uuid.uuid4())
     with _db_lock:
         get_db().execute(
-            "INSERT OR REPLACE INTO nodes VALUES (?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO nodes VALUES (?,?,?,?,?,?,?,?)",
             (
                 node_id,
                 address,
@@ -102,7 +103,30 @@ def register_node(node_id, address, labels=None, capacity=None):
                 1,
                 time.time(),
                 None,
+                token,
             )
+        )
+        get_db().commit()
+    return token
+
+
+def verify_node_token(node_id, token):
+    """Return True if the token matches the stored token for node_id."""
+    row = get_db().execute(
+        "SELECT token FROM nodes WHERE id=?",
+        (node_id,)
+    ).fetchone()
+    if row is None:
+        return False
+    return row[0] == token
+
+
+def revoke_node(node_id):
+    """Set the node token to NULL, blocking further authenticated requests."""
+    with _db_lock:
+        get_db().execute(
+            "UPDATE nodes SET token=NULL WHERE id=?",
+            (node_id,)
         )
         get_db().commit()
 

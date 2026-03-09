@@ -1,4 +1,3 @@
-
 import typer, httpx, time
 from rich import print
 from rich.table import Table
@@ -68,8 +67,6 @@ def status():
         status_val = j["status"]
         colour = STATUS_COLOUR.get(status_val, "white")
 
-        # For active jobs show time since creation; for terminal jobs show
-        # how long they ran (created → updated)
         created = j.get("created") or now
         updated = j.get("updated") or now
         if status_val in ACTIVE_STATUSES:
@@ -132,11 +129,19 @@ def undeploy(name: str):
     r = httpx.delete(f"{API}/workloads/{name}")
     print(r.json())
 
+
 @app.command()
 def logs(job: str):
     r = httpx.get(f"{API}/jobs/{job}/logs")
     for line in r.json():
         print(line["line"])
+
+
+@app.command()
+def revoke(node_id: str):
+    """Revoke a node's token, preventing it from communicating with the controller."""
+    r = httpx.delete(f"{API}/nodes/{node_id}")
+    print(r.json())
 
 
 if __name__ == "__main__":

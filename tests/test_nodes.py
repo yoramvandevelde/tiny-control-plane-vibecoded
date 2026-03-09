@@ -11,7 +11,7 @@ def _setup(tmp_path):
 def test_node_registration(tmp_path):
     _setup(tmp_path)
 
-    register_node(
+    _ = register_node(
         "node1",
         "http://localhost:9000",
         {"region": "eu"},
@@ -28,7 +28,7 @@ def test_node_registration(tmp_path):
 def test_node_registration_without_labels(tmp_path):
     _setup(tmp_path)
 
-    register_node("node1", "http://localhost:9000")
+    _ = register_node("node1", "http://localhost:9000")
 
     nodes = list_nodes()
     assert nodes["node1"]["labels"] == {}
@@ -38,8 +38,8 @@ def test_node_registration_without_labels(tmp_path):
 def test_node_replace_on_reregister(tmp_path):
     _setup(tmp_path)
 
-    register_node("node1", "http://localhost:9000", labels={"region": "eu"})
-    register_node("node1", "http://localhost:9000", labels={"region": "us"})
+    _ = register_node("node1", "http://localhost:9000", labels={"region": "eu"})
+    _ = register_node("node1", "http://localhost:9000", labels={"region": "us"})
 
     nodes = list_nodes()
     assert len(nodes) == 1
@@ -49,7 +49,7 @@ def test_node_replace_on_reregister(tmp_path):
 def test_update_state_marks_healthy(tmp_path):
     _setup(tmp_path)
 
-    register_node("node1", "http://localhost:9000")
+    _ = register_node("node1", "http://localhost:9000")
     update_state("node1", {"node": "node1", "cpu": 0.3, "mem": 0.5, "disk_free": 0.8})
 
     nodes = list_nodes()
@@ -60,7 +60,7 @@ def test_update_state_marks_healthy(tmp_path):
 def test_update_state_marks_unhealthy_on_high_cpu(tmp_path):
     _setup(tmp_path)
 
-    register_node("node1", "http://localhost:9000")
+    _ = register_node("node1", "http://localhost:9000")
     update_state("node1", {"node": "node1", "cpu": 0.95, "mem": 0.5, "disk_free": 0.8})
 
     nodes = list_nodes()
@@ -70,7 +70,7 @@ def test_update_state_marks_unhealthy_on_high_cpu(tmp_path):
 def test_update_state_marks_unhealthy_on_high_mem(tmp_path):
     _setup(tmp_path)
 
-    register_node("node1", "http://localhost:9000")
+    _ = register_node("node1", "http://localhost:9000")
     update_state("node1", {"node": "node1", "cpu": 0.3, "mem": 0.95, "disk_free": 0.8})
 
     nodes = list_nodes()
@@ -80,7 +80,7 @@ def test_update_state_marks_unhealthy_on_high_mem(tmp_path):
 def test_last_seen_is_updated(tmp_path):
     _setup(tmp_path)
 
-    register_node("node1", "http://localhost:9000")
+    _ = register_node("node1", "http://localhost:9000")
     before = time.time()
     update_state("node1", {"node": "node1", "cpu": 0.1, "mem": 0.1, "disk_free": 0.9})
     after = time.time()

@@ -1,9 +1,9 @@
-import socket, psutil, httpx, subprocess, argparse, time, threading, queue
+import socket, psutil, httpx, subprocess, argparse, time, threading, queue, os, sys
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--node-id", default=socket.gethostname())
 parser.add_argument("--port", type=int, default=9000)
-parser.add_argument("--label",action="append",help="Node labels: key=value")
+parser.add_argument("--label", action="append", help="Node labels: key=value")
 args = parser.parse_args()
 
 CONTROLLER = "http://localhost:8000"
@@ -21,12 +21,23 @@ _results: queue.Queue = queue.Queue()
 _running_jobs: set = set()
 _running_lock = threading.Lock()
 
+# Set after successful registration
+_node_token: str | None = None
+
+
+def _headers() -> dict:
+    if _node_token:
+        return {"X-Node-Token": _node_token}
+    return {}
+
+
 def parse_labels(label_args):
     labels = {}
     for l in label_args or []:
         k, _, v = l.partition("=")
         labels[k] = v
     return labels
+
 
 def state():
     disk = psutil.disk_usage("/")
@@ -39,14 +50,28 @@ def state():
 
 
 def register():
-    httpx.post(
+    global _node_token
+    bootstrap_token = os.environ.get("TCP_BOOTSTRAP_TOKEN", "")
+    if not bootstrap_token:
+        print("[agent] TCP_BOOTSTRAP_TOKEN is not set, cannot register")
+        sys.exit(1)
+
+    r = httpx.post(
         f"{CONTROLLER}/register",
         json={
             "node": node,
             "address": f"http://localhost:{args.port}",
             "labels": parse_labels(args.label),
-        }
+        },
+        headers={"X-Bootstrap-Token": bootstrap_token},
     )
+    if r.status_code == 401:
+        print("[agent] registration rejected: invalid bootstrap token")
+        sys.exit(1)
+
+    _node_token = r.json()["token"]
+    print(f"[agent] registered as {node}")
+
 
 def run_shell(command: str) -> str:
     return subprocess.check_output(
@@ -83,7 +108,8 @@ def send_logs(job_id: str, output: str):
         try:
             httpx.post(
                 f"{CONTROLLER}/agent/log",
-                json={"job": job_id, "line": line},
+                json={"job": job_id, "line": line, "node": node},
+                headers=_headers(),
                 timeout=1,
             )
         except Exception:
@@ -116,7 +142,12 @@ def send_heartbeats():
 
     for job_id in job_ids:
         try:
-            httpx.post(f"{CONTROLLER}/agent/heartbeat/{job_id}", timeout=1)
+            httpx.post(
+                f"{CONTROLLER}/agent/heartbeat/{job_id}",
+                json={"node": node},
+                headers=_headers(),
+                timeout=1,
+            )
         except Exception:
             pass
 
@@ -126,7 +157,11 @@ def loop():
 
     while True:
         try:
-            httpx.post(f"{CONTROLLER}/state", json=state())
+            httpx.post(
+                f"{CONTROLLER}/state",
+                json=state(),
+                headers=_headers(),
+            )
 
             # Send heartbeats on interval
             now = time.time()
@@ -141,13 +176,22 @@ def loop():
                 try:
                     httpx.post(
                         f"{CONTROLLER}/agent/result",
-                        json={"job": job_id, "status": status, "result": result},
+                        json={"job": job_id, "status": status, "result": result, "node": node},
+                        headers=_headers(),
                     )
                 except Exception as e:
                     print(f"[{node}] failed to post result for {job_id}: {e}")
 
             # Pick up a new pending job (one per poll cycle is fine)
-            r = httpx.get(f"{CONTROLLER}/agent/jobs/{node}")
+            r = httpx.get(
+                f"{CONTROLLER}/agent/jobs/{node}",
+                headers=_headers(),
+            )
+            if r.status_code == 401:
+                print(f"[{node}] token rejected by controller — node may have been revoked")
+                time.sleep(10)
+                continue
+
             data = r.json()
 
             if "job" in data:
