@@ -16,7 +16,7 @@ def test_execute_shell_job():
     job = {"image": None, "command": "echo hello"}
     status, result = agent_module.execute(job)
 
-    assert status == "finished"
+    assert status == "succeeded"
     assert "hello" in result
 
 
@@ -43,7 +43,7 @@ def test_execute_docker_job(monkeypatch):
     job = {"image": "alpine", "command": "echo hello"}
     status, result = agent_module.execute(job)
 
-    assert status == "finished"
+    assert status == "succeeded"
     assert result == "hello\n"
 
 
