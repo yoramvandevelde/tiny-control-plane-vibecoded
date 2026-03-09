@@ -250,8 +250,11 @@ def scale_workload(name: str, data: dict):
 
 @app.delete("/workloads/{name}")
 def remove_workload(name: str):
+    excess = get_excess_workload_jobs(name, 0)
+    for job_id, node_id in excess:
+        cancel_job(job_id, node_id)
     delete_workload(name)
-    return {"ok": True}
+    return {"ok": True, "cancelled": len(excess)}
 
 
 @app.get("/jobs/{job_id}/logs")

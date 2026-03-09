@@ -108,3 +108,26 @@ def test_reconciler_does_not_replace_cancelled_jobs(tmp_path):
     reconcile_once()
     assert count_active_workload_jobs("workers") == 2
     assert len(list_jobs()) == 3  # original 2 + 1 replacement
+
+
+def test_undeploy_cancels_active_jobs(tmp_path):
+    _setup(tmp_path)
+
+    _ = register_node("node1", "http://localhost:9000", capacity={"cpu": 4, "mem": 8192})
+    from controller.store import create_workload, list_jobs, JobStatus, delete_workload
+    from controller.api import get_excess_workload_jobs
+    create_workload("workers", "sleep 100", 2)
+
+    reconcile_once()
+    assert len(list_jobs()) == 2
+
+    # Simulate what remove_workload does
+    excess = get_excess_workload_jobs("workers", 0)
+    for job_id, node_id in excess:
+        cancel_job(job_id, node_id)
+    delete_workload("workers")
+
+    jobs = list_jobs()
+    assert all(j["status"] == JobStatus.LOST for j in jobs)
+    queued = pop_cancel_jobs("node1")
+    assert len(queued) == 2
