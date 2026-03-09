@@ -75,7 +75,19 @@ def loop():
             data = r.json()
 
             if "job" in data:
+                job_id = data["job"]
+                image = data.get("image")
+                command = data.get("command")
+
+                if image:
+                    print(f"[{node}] running job {job_id}: docker run {image} {command}")
+                else:
+                    print(f"[{node}] running job {job_id}: shell: {command}")
+
                 status, result = execute(data)
+
+                print(f"[{node}] job {job_id}: {status}")
+
                 httpx.post(
                     f"{CONTROLLER}/agent/result",
                     json={
@@ -85,8 +97,7 @@ def loop():
                     }
                 )
 
-        except Exception as e:
-            print(f"[agent] error: {e}")    
+        except Exception:
             pass
 
         time.sleep(2)
