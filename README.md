@@ -31,6 +31,7 @@ Somehow, this still resulted in:
 * reconciliation loop
 * Docker container execution
 * workload lifecycle management
+* formal job states with failure handling
 
 Which is suspiciously close to a real orchestrator.
 
@@ -53,6 +54,14 @@ or until someone pulled the plug on the controller.
 
 > "We built desired state without building undesired state.
 > In our defense, Kubernetes took three years to add this too."
+
+Then we added formal job states. It turned out we had been using the string
+`"finished"` to mean success, which is fine until you need to distinguish
+success from failure from disappearance. So we added `succeeded`, `failed`,
+and `lost`. The old `"finished"` still works — we normalise it on the way in.
+
+> "Any sufficiently advanced status string is indistinguishable from a bug.
+> We had four states that needed five names and one that needed to be retired."
 
 ---
 
@@ -127,6 +136,33 @@ GET /agent/jobs/<node>
 
 and execute commands locally — either as a shell command or inside a Docker
 container, depending on whether an image is specified.
+
+---
+
+### Job Lifecycle States
+
+Every job moves through a defined set of states:
+
+```
+pending → running → succeeded
+                  → failed
+                  → lost
+```
+
+`pending` — job has been scheduled, not yet picked up by an agent.
+
+`running` — agent has claimed the job and is executing it.
+
+`succeeded` — job completed with exit code 0.
+
+`failed` — job completed with a non-zero exit code.
+
+`lost` — job was running but the agent disappeared before reporting a result.
+
+Only `pending` and `running` jobs count as active. The reconciler uses this
+to determine how many new jobs to create for a workload. A `lost` job is
+treated the same as a finished one — the reconciler will schedule a
+replacement on the next pass.
 
 ---
 
@@ -302,12 +338,13 @@ Workload output is captured by agents and stored by the controller.
 You can retrieve logs for any job:
 
 ```bash
-tcp logs <job_id>
+python cli/tcp.py logs <job_id>
 ```
 
 Example:
+
 ```bash
-$ tcp logs 6c1f5a4e
+$ python cli/tcp.py logs 6c1f5a4e
 starting worker
 processing item 1
 processing item 2
@@ -349,3 +386,7 @@ Do not tell them about the patch cycle either.
 
 Do not tell them it took a user asking "can we stop workers?" for us to notice
 there was no off switch.
+
+Do not tell them we had a state called `"finished"` that meant success, and
+only noticed when we needed to add failure.
+
