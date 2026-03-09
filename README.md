@@ -30,6 +30,7 @@ Somehow, this still resulted in:
 * least-loaded binpacking
 * reconciliation loop
 * Docker container execution
+* workload lifecycle management
 
 Which is suspiciously close to a real orchestrator.
 
@@ -44,14 +45,14 @@ Apparently vibecoding also has a patch cycle now.
 > Then the patch was wrong. Then the patch path was wrong.
 > Three iterations to fix four bugs. This is just software."
 
-Then Docker support was added. The agent gained the ability to pull and run
-containers. The first test command was `echo hello` in an Alpine image.
+Then someone asked: "can we stop workers?"
 
-It worked. We felt powerful. Then we noticed the jobs were stuck on `pending`
-because exceptions were silently swallowed and Docker wasn't running.
+It turned out we had built an orchestrator with no off switch.
+The reconciler would just keep scheduling jobs until the heat death of the universe,
+or until someone pulled the plug on the controller.
 
-> "Adding container orchestration to your orchestrator is straightforward.
-> Remembering to start Docker is optional, apparently."
+> "We built desired state without building undesired state.
+> In our defense, Kubernetes took three years to add this too."
 
 ---
 
@@ -73,6 +74,7 @@ The controller:
 2. evaluates health
 3. schedules jobs using label constraints and least-CPU binpacking
 4. maintains desired workloads via reconciliation
+5. removes workloads when asked nicely
 
 ---
 
@@ -123,7 +125,7 @@ Agents poll:
 GET /agent/jobs/<node>
 ```
 
-and execute the job locally — either as a shell command or inside a Docker
+and execute commands locally — either as a shell command or inside a Docker
 container, depending on whether an image is specified.
 
 ---
@@ -187,6 +189,22 @@ This pattern is called **reconciliation**. It is the core of Kubernetes.
 Each job is linked to its workload by name, not by command string. Two
 workloads with the same command do not interfere with each other's replica
 counts.
+
+---
+
+### Stopping Workloads
+
+To stop a workload, undeploy it:
+
+```bash
+python cli/tcp.py undeploy workers
+```
+
+This removes the workload from the controller. The reconciler will no longer
+schedule new jobs for it on the next pass.
+
+Jobs that are already running complete normally — they are not killed.
+Only future scheduling is stopped.
 
 ---
 
@@ -263,31 +281,17 @@ Declare a workload with a label constraint:
 python cli/tcp.py deploy eu-workers uptime 3 --constraint region=eu
 ```
 
+Stop a workload:
+
+```bash
+python cli/tcp.py undeploy workers
+```
+
 List all jobs:
 
 ```bash
 python cli/tcp.py jobs
 ```
-
----
-
-# Debugging Docker Jobs
-
-If Docker jobs are stuck on `pending`, check these in order:
-
-```bash
-# is Docker running?
-docker ps
-
-# did containers start and exit?
-docker ps -a
-
-# test the image manually
-docker run --rm --network none alpine echo hello
-```
-
-If nothing appears in `docker ps -a` while jobs sit pending, the agent is
-hitting a silent exception. Check the agent terminal output.
 
 ---
 
@@ -300,10 +304,6 @@ pytest
 Tests are synchronous and call `reconcile_once()` directly. No async timing,
 no `sleep(1)` and hope. Each test gets an isolated SQLite database via
 `tmp_path`.
-
-If tests fail with schema errors, delete `cluster.db` and restart the
-controller. The schema has evolved across versions and old database files
-will not have the right columns.
 
 ---
 
@@ -322,4 +322,5 @@ Do not tell the enterprise architects.
 
 Do not tell them about the patch cycle either.
 
-Do not tell them we added Docker support and immediately forgot to start Docker.
+Do not tell them it took a user asking "can we stop workers?" for us to notice
+there was no off switch.

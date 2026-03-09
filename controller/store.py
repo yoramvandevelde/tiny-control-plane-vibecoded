@@ -209,6 +209,12 @@ def create_workload(name, command, replicas, image=None, constraints=None, resou
         get_db().commit()
 
 
+def delete_workload(name):
+    with _db_lock:
+        get_db().execute("DELETE FROM workloads WHERE name=?", (name,))
+        get_db().commit()
+
+
 def list_workloads():
     rows = get_db().execute(
         "SELECT name, command, image, replicas, constraints, resources FROM workloads"

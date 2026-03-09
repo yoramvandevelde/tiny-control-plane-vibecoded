@@ -16,6 +16,7 @@ from controller.store import (
     create_workload,
     list_workloads,
     count_active_workload_jobs,
+    delete_workload,
 )
 
 NODE_STALE_SECONDS = 30
@@ -156,3 +157,9 @@ def workload(data: dict):
 @app.get("/workloads")
 def workloads():
     return list_workloads()
+
+
+@app.delete("/workloads/{name}")
+def remove_workload(name: str):
+    delete_workload(name)
+    return {"ok": True}

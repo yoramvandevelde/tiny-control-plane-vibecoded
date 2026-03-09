@@ -58,5 +58,11 @@ def deploy(
     print(r.json())
 
 
+@app.command()
+def undeploy(name: str):
+    r = httpx.delete(f"{API}/workloads/{name}")
+    print(r.json())
+
+
 if __name__ == "__main__":
     app()
