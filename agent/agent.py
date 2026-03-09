@@ -1,4 +1,4 @@
-import socket, psutil, httpx, subprocess, argparse, time
+import socket, psutil, httpx, subprocess, argparse, time, threading, queue
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--node-id", default=socket.gethostname())
@@ -6,11 +6,19 @@ parser.add_argument("--port", type=int, default=9000)
 args = parser.parse_args()
 
 CONTROLLER = "http://localhost:8000"
+HEARTBEAT_INTERVAL = 15  # seconds between heartbeats while a job is running
+
 node = args.node_id
 
-# Mirror the controller's status strings so we speak the same language
 STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED    = "failed"
+
+# Queue for completed jobs: (job_id, status, result)
+_results: queue.Queue = queue.Queue()
+
+# Set of job_ids currently being heartbeated
+_running_jobs: set = set()
+_running_lock = threading.Lock()
 
 
 def state():
@@ -39,11 +47,6 @@ def run_shell(command: str) -> str:
 
 
 def run_docker(image: str, command: str) -> str:
-    """
-    Run a container to completion and return its stdout+stderr.
-    --rm cleans up automatically.
-    No network, no privilege -- keeps it simple and safe-ish.
-    """
     cmd = ["docker", "run", "--rm", "--network", "none", image]
     if command:
         cmd += command.split()
@@ -55,10 +58,6 @@ def run_docker(image: str, command: str) -> str:
 
 
 def execute(job: dict) -> tuple[str, str]:
-    """
-    Returns (status, output).
-    Uses Docker if an image is specified, shell otherwise.
-    """
     try:
         if job.get("image"):
             out = run_docker(job["image"], job["command"])
@@ -81,11 +80,63 @@ def send_logs(job_id: str, output: str):
             pass
 
 
+def run_job_thread(job: dict):
+    """
+    Runs in a background thread. Executes the job, sends logs, then puts
+    the result on the queue for the main loop to post back to the controller.
+    """
+    job_id = job["job"]
+
+    with _running_lock:
+        _running_jobs.add(job_id)
+
+    try:
+        status, result = execute(job)
+        send_logs(job_id, result)
+        _results.put((job_id, status, result))
+    finally:
+        with _running_lock:
+            _running_jobs.discard(job_id)
+
+
+def send_heartbeats():
+    """Send a heartbeat for every job currently running."""
+    with _running_lock:
+        job_ids = list(_running_jobs)
+
+    for job_id in job_ids:
+        try:
+            httpx.post(f"{CONTROLLER}/agent/heartbeat/{job_id}", timeout=2)
+        except Exception:
+            pass
+
+
 def loop():
+    last_heartbeat = 0.0
+
     while True:
         try:
             httpx.post(f"{CONTROLLER}/state", json=state())
 
+            # Send heartbeats on interval
+            now = time.time()
+            if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+                send_heartbeats()
+                last_heartbeat = now
+
+            # Drain completed jobs and post results
+            while not _results.empty():
+                job_id, status, result = _results.get_nowait()
+                print(f"[{node}] job {job_id}: {status}")
+                try:
+                    httpx.post(
+                        f"{CONTROLLER}/agent/result",
+                        json={"job": job_id, "status": status, "result": result},
+                    )
+                except Exception as e:
+                    print(f"[{node}] failed to post result for {job_id}: {e}")
+
+            # Pick up a new pending job (one per poll cycle is fine)
             r = httpx.get(f"{CONTROLLER}/agent/jobs/{node}")
             data = r.json()
 
@@ -95,24 +146,12 @@ def loop():
                 command = data.get("command")
 
                 if image:
-                    print(f"[{node}] running job {job_id}: docker run {image} {command}")
+                    print(f"[{node}] starting job {job_id}: docker run {image} {command}")
                 else:
-                    print(f"[{node}] running job {job_id}: shell: {command}")
+                    print(f"[{node}] starting job {job_id}: shell: {command}")
 
-                status, result = execute(data)
-
-                send_logs(job_id, result)
-
-                print(f"[{node}] job {job_id}: {status}")
-
-                httpx.post(
-                    f"{CONTROLLER}/agent/result",
-                    json={
-                        "job": data["job"],
-                        "status": status,
-                        "result": result,
-                    }
-                )
+                t = threading.Thread(target=run_job_thread, args=(data,), daemon=True)
+                t.start()
 
         except Exception as e:
             print(f"[agent] error: {e}")

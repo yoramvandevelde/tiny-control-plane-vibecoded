@@ -1,6 +1,7 @@
 
 from fastapi import FastAPI
 import asyncio
+import random
 import time
 from contextlib import asynccontextmanager
 from controller.store import (
@@ -14,9 +15,12 @@ from controller.store import (
     start_job,
     finish_job,
     mark_lost,
+    renew_lease,
+    expire_lost_jobs,
     create_workload,
     list_workloads,
     count_active_workload_jobs,
+    count_active_node_jobs,
     delete_workload,
     store_log,
     get_logs,
@@ -31,7 +35,8 @@ def pick_node(nodes: dict, constraints: dict, resources: dict) -> str | None:
     Select a node using:
     1. Only healthy, recently-seen nodes
     2. Label constraint matching
-    3. Least-loaded (by CPU) among candidates
+    3. Least active jobs (primary) + lowest CPU (secondary)
+    4. Random shuffle before sorting so equal scores are broken randomly
     """
     now = time.time()
     candidates = []
@@ -47,18 +52,23 @@ def pick_node(nodes: dict, constraints: dict, resources: dict) -> str | None:
         if not all(labels.get(k) == v for k, v in constraints.items()):
             continue
 
+        job_count = count_active_node_jobs(node_id)
         cpu_used = info.get("state", {}).get("cpu", 0)
-        candidates.append((cpu_used, node_id))
+        candidates.append((job_count, cpu_used, node_id))
 
     if not candidates:
         return None
 
-    candidates.sort(key=lambda x: x[0])
-    return candidates[0][1]
+    random.shuffle(candidates)
+    candidates.sort(key=lambda x: (x[0], x[1]))
+    return candidates[0][2]
 
 
 def reconcile_once():
-    """Run a single reconcile pass. Extracted so tests can call it directly."""
+    # Expire leases before counting active jobs so lost jobs don't block
+    # workload replica targets
+    expire_lost_jobs()
+
     workloads = list_workloads()
     nodes = list_nodes()
 
@@ -137,6 +147,12 @@ def agent_job(node: str):
     start_job(jid)
 
     return {"job": jid, "command": cmd, "image": image}
+
+
+@app.post("/agent/heartbeat/{job_id}")
+def agent_heartbeat(job_id: str):
+    renew_lease(job_id)
+    return {"ok": True}
 
 
 @app.post("/agent/result")

@@ -1,4 +1,5 @@
 import os
+import time
 from controller.store import (
     init_db, create_job, list_jobs, get_pending_job,
     start_job, finish_job, mark_lost, JobStatus,
@@ -39,6 +40,19 @@ def test_job_creation_with_workload_name(tmp_path):
     create_job("node1", "uptime", workload_name="workers")
 
     assert list_jobs()[0]["workload_name"] == "workers"
+
+
+def test_job_creation_records_timestamps(tmp_path):
+    _setup(tmp_path)
+
+    before = time.time()
+    create_job("node1", "uptime")
+    after = time.time()
+
+    job = list_jobs()[0]
+    assert job["created"] is not None
+    assert job["updated"] is not None
+    assert before <= job["created"] <= after
 
 
 def test_job_lifecycle_succeeded(tmp_path):
@@ -125,3 +139,18 @@ def test_lost_job_not_counted_as_active(tmp_path):
 
     mark_lost(jid)
     assert count_active_workload_jobs("workers") == 1
+
+
+def test_list_jobs_includes_timestamps(tmp_path):
+    _setup(tmp_path)
+
+    jid = create_job("node1", "uptime")
+    start_job(jid)
+
+    job = list_jobs()[0]
+    assert "created" in job
+    assert "updated" in job
+    assert job["created"] is not None
+    assert job["updated"] is not None
+    # updated should be >= created after start_job
+    assert job["updated"] >= job["created"]

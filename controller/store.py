@@ -6,7 +6,9 @@ _db_lock = threading.Lock()
 
 DB_PATH = "cluster.db"
 
-# Canonical job states
+LEASE_SECONDS = 60
+
+
 class JobStatus:
     PENDING   = "pending"
     RUNNING   = "running"
@@ -14,9 +16,7 @@ class JobStatus:
     FAILED    = "failed"
     LOST      = "lost"
 
-    # States where the job is no longer active
     TERMINAL = {SUCCEEDED, FAILED, LOST}
-    # States where the job is still active (counts toward replica targets)
     ACTIVE   = {PENDING, RUNNING}
 
 
@@ -62,7 +62,8 @@ def init_db(path=None):
         status TEXT,
         result TEXT,
         created REAL,
-        updated REAL
+        updated REAL,
+        lease_expires REAL
     )
     """)
 
@@ -144,8 +145,8 @@ def create_job(node_id, command, image=None, workload_name=None):
             """
             INSERT INTO jobs (
                 id, node_id, command, image, workload_name,
-                constraints, resources, status, result, created, updated
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                constraints, resources, status, result, created, updated, lease_expires
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 jid,
@@ -159,6 +160,7 @@ def create_job(node_id, command, image=None, workload_name=None):
                 None,
                 time.time(),
                 time.time(),
+                None,
             ),
         )
         get_db().commit()
@@ -177,22 +179,27 @@ def get_pending_job(node_id):
 def start_job(job_id):
     with _db_lock:
         get_db().execute(
-            "UPDATE jobs SET status=?, updated=? WHERE id=?",
-            (JobStatus.RUNNING, time.time(), job_id)
+            "UPDATE jobs SET status=?, updated=?, lease_expires=? WHERE id=?",
+            (JobStatus.RUNNING, time.time(), time.time() + LEASE_SECONDS, job_id)
+        )
+        get_db().commit()
+
+
+def renew_lease(job_id):
+    with _db_lock:
+        get_db().execute(
+            "UPDATE jobs SET lease_expires=? WHERE id=? AND status=?",
+            (time.time() + LEASE_SECONDS, job_id, JobStatus.RUNNING)
         )
         get_db().commit()
 
 
 def finish_job(job_id, status, result):
-    """
-    status should be JobStatus.SUCCEEDED or JobStatus.FAILED.
-    The agent sends 'finished' for success; we normalise here.
-    """
     if status == "finished":
         status = JobStatus.SUCCEEDED
     with _db_lock:
         get_db().execute(
-            "UPDATE jobs SET status=?, result=?, updated=? WHERE id=?",
+            "UPDATE jobs SET status=?, result=?, updated=?, lease_expires=NULL WHERE id=?",
             (status, result, time.time(), job_id)
         )
         get_db().commit()
@@ -207,9 +214,22 @@ def mark_lost(job_id):
         get_db().commit()
 
 
+def expire_lost_jobs():
+    """Mark running jobs whose lease has expired as lost."""
+    with _db_lock:
+        get_db().execute(
+            """
+            UPDATE jobs SET status=?, updated=?
+            WHERE status=? AND lease_expires IS NOT NULL AND lease_expires < ?
+            """,
+            (JobStatus.LOST, time.time(), JobStatus.RUNNING, time.time())
+        )
+        get_db().commit()
+
+
 def list_jobs():
     rows = get_db().execute(
-        "SELECT id, node_id, command, image, workload_name, status, result FROM jobs"
+        "SELECT id, node_id, command, image, workload_name, status, result, created, updated FROM jobs"
     ).fetchall()
 
     return [
@@ -221,9 +241,21 @@ def list_jobs():
             "workload_name": r[4],
             "status": r[5],
             "result": r[6],
+            "created": r[7],
+            "updated": r[8],
         }
         for r in rows
     ]
+
+
+def count_active_node_jobs(node_id):
+    """Count pending+running jobs assigned to a node."""
+    placeholders = ",".join("?" * len(JobStatus.ACTIVE))
+    row = get_db().execute(
+        f"SELECT COUNT(*) FROM jobs WHERE node_id=? AND status IN ({placeholders})",
+        (node_id, *JobStatus.ACTIVE)
+    ).fetchone()
+    return row[0]
 
 
 def count_active_workload_jobs(workload_name):

@@ -32,6 +32,8 @@ Somehow, this still resulted in:
 * Docker container execution
 * workload lifecycle management
 * formal job states with failure handling
+* job leases and lost job detection
+* a CLI that tells you what is actually happening
 
 Which is suspiciously close to a real orchestrator.
 
@@ -57,11 +59,24 @@ or until someone pulled the plug on the controller.
 
 Then we added formal job states. It turned out we had been using the string
 `"finished"` to mean success, which is fine until you need to distinguish
-success from failure from disappearance. So we added `succeeded`, `failed`,
-and `lost`. The old `"finished"` still works — we normalise it on the way in.
+success from failure from disappearance.
 
 > "Any sufficiently advanced status string is indistinguishable from a bug.
 > We had four states that needed five names and one that needed to be retired."
+
+Then the scheduler was putting all jobs on the same node. It turned out that
+with `sleep 1000` running, CPU stays near zero everywhere, and floating point
+noise consistently picked the same winner. We switched to job count as the
+primary score and added a random shuffle to break ties.
+
+> "Our scheduler was doing least-loaded selection.
+> It was selecting correctly. The load was just wrong."
+
+Then someone asked: "can we see what is actually running?" It turned out we
+had an orchestrator with no dashboard, no status view, and a `jobs` command
+that printed raw JSON. The `status` command was added.
+
+Do not tell the enterprise architects any of this.
 
 ---
 
@@ -81,9 +96,10 @@ The controller:
 
 1. tracks nodes
 2. evaluates health
-3. schedules jobs using label constraints and least-CPU binpacking
+3. schedules jobs using label constraints and job-count + CPU binpacking
 4. maintains desired workloads via reconciliation
-5. removes workloads when asked nicely
+5. expires lost jobs via lease timeouts
+6. removes workloads when asked nicely
 
 ---
 
@@ -137,6 +153,9 @@ GET /agent/jobs/<node>
 and execute commands locally — either as a shell command or inside a Docker
 container, depending on whether an image is specified.
 
+Jobs run in background threads on the agent, so a node can pick up new work
+while existing jobs are still running.
+
 ---
 
 ### Job Lifecycle States
@@ -161,8 +180,21 @@ pending → running → succeeded
 
 Only `pending` and `running` jobs count as active. The reconciler uses this
 to determine how many new jobs to create for a workload. A `lost` job is
-treated the same as a finished one — the reconciler will schedule a
-replacement on the next pass.
+treated as finished — the reconciler will schedule a replacement on the next pass.
+
+---
+
+### Job Leases
+
+When an agent picks up a job it receives a lease that expires after 60 seconds.
+The agent renews the lease every 15 seconds by sending a heartbeat:
+
+```
+POST /agent/heartbeat/<job_id>
+```
+
+If the agent dies mid-job, heartbeats stop. The next reconcile pass will find
+the expired lease and mark the job `lost`, after which a replacement is scheduled.
 
 ---
 
@@ -173,8 +205,10 @@ Jobs are placed using:
 1. **Label constraint matching** — only nodes whose labels satisfy all
    constraints are considered
 2. **Health and staleness filter** — unhealthy or stale nodes are excluded
-3. **Least-loaded selection** — among eligible nodes, the one with the
-   lowest reported CPU usage is chosen
+3. **Least active jobs** — the node with the fewest pending+running jobs is preferred
+4. **Lowest CPU** — used as a tiebreaker when job counts are equal
+5. **Random shuffle** — candidates are shuffled before sorting so exact ties
+   are broken randomly rather than by dict ordering or floating point noise
 
 This is a real scheduling pipeline: filter → score → pick.
 Which is exactly what Kubernetes does, minus 400 lines of Go per step.
@@ -206,7 +240,7 @@ command  = uptime
 
 The controller ensures 3 copies are always running.
 
-If jobs finish or nodes disappear → the controller starts new ones.
+If jobs finish, fail, or get lost → the controller starts new ones.
 
 Workloads support label constraints, so you can pin replicas to a region:
 
@@ -323,11 +357,34 @@ Stop a workload:
 python cli/tcp.py undeploy workers
 ```
 
-List all jobs:
+Show job status with elapsed times:
+
+```bash
+python cli/tcp.py status
+```
+
+List all jobs (raw JSON):
 
 ```bash
 python cli/tcp.py jobs
 ```
+
+---
+
+## Status View
+
+The `status` command shows a formatted table of all jobs:
+
+```
+ job id    node    workload   command   status      elapsed
+ ──────────────────────────────────────────────────────────
+ 3a1f9c2b  node1   workers    uptime    running     1m 4s
+ 7bd02e11  node2   workers    uptime    running     1m 2s
+ c4e88a30  node1   workers    uptime    succeeded   0s
+```
+
+For active jobs, elapsed counts from creation. For terminal jobs, it shows
+how long the job actually ran.
 
 ---
 
@@ -390,3 +447,8 @@ there was no off switch.
 Do not tell them we had a state called `"finished"` that meant success, and
 only noticed when we needed to add failure.
 
+Do not tell them the scheduler was putting all jobs on the same node because
+`sleep 1000` uses no CPU and floating point picked a favourite.
+
+Do not tell them we added `status` because someone asked "but what is it
+actually doing?" and the honest answer was "we have no idea, here is some JSON."
