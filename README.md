@@ -180,6 +180,12 @@ python cli/tcp.py deploy workers uptime 3
 
 ---
 
+# Testing
+
+"This project contains three tests, which is roughly three more tests than most vibecoded infrastructure projects."
+
+---
+
 # Disclaimer
 
 This project was built primarily for learning and experimentation.

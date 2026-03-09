@@ -1,10 +1,18 @@
 
 import sqlite3, json, time, uuid
 
-DB = sqlite3.connect("cluster.db", check_same_thread=False)
+DB = None
+
+def get_db():
+    global DB
+
+    if DB is None:
+        DB = sqlite3.connect("cluster.db", check_same_thread=False)
+
+    return DB
 
 def init_db():
-    DB.execute("""
+    get_db().execute("""
     CREATE TABLE IF NOT EXISTS nodes (
         id TEXT PRIMARY KEY,
         address TEXT,
@@ -16,7 +24,7 @@ def init_db():
     )
     """)
 
-    DB.execute("""
+    get_db().execute("""
     CREATE TABLE IF NOT EXISTS jobs (
         id TEXT PRIMARY KEY,
         node_id TEXT,
@@ -30,7 +38,7 @@ def init_db():
     )
     """)
 
-    DB.execute("""
+    get_db().execute("""
     CREATE TABLE IF NOT EXISTS workloads (
         name TEXT PRIMARY KEY,
         command TEXT,
@@ -38,11 +46,11 @@ def init_db():
     )
     """)
 
-    DB.commit()
+    get_db().commit()
 
 
 def register_node(node_id, address, labels=None, capacity=None):
-    DB.execute(
+    get_db().execute(
         "INSERT OR REPLACE INTO nodes VALUES (?,?,?,?,?,?,?)",
         (
             node_id,
@@ -54,19 +62,19 @@ def register_node(node_id, address, labels=None, capacity=None):
             None
         )
     )
-    DB.commit()
+    get_db().commit()
 
 
 def update_state(node_id, state):
-    DB.execute(
+    get_db().execute(
         "UPDATE nodes SET state_json=?, last_seen=? WHERE id=?",
         (json.dumps(state), time.time(), node_id)
     )
-    DB.commit()
+    get_db().commit()
 
 
 def list_nodes():
-    rows = DB.execute(
+    rows = get_db().execute(
         "SELECT id,address,labels,capacity,healthy,state_json FROM nodes"
     ).fetchall()
 
@@ -85,17 +93,42 @@ def list_nodes():
 
 
 def create_job(node_id, command):
+
     jid = str(uuid.uuid4())
-    DB.execute(
-        "INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?)",
-        (jid, node_id, command, "{}", "{}", "pending", None, time.time(), time.time())
+
+    get_db().execute(
+        """
+        INSERT INTO jobs (
+            id,
+            node_id,
+            command,
+            constraints,
+            resources,
+            status,
+            result,
+            created,
+            updated
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            jid,
+            node_id,
+            command,
+            "{}",
+            "{}",
+            "pending",
+            None,
+            time.time(),
+            time.time(),
+        ),
     )
-    DB.commit()
+
+    get_db().commit()
+
     return jid
 
-
 def get_pending_job(node_id):
-    row = DB.execute(
+    row = get_db().execute(
         "SELECT id,command FROM jobs WHERE node_id=? AND status='pending' LIMIT 1",
         (node_id,)
     ).fetchone()
@@ -103,23 +136,23 @@ def get_pending_job(node_id):
 
 
 def start_job(job_id):
-    DB.execute(
+    get_db().execute(
         "UPDATE jobs SET status='running', updated=? WHERE id=?",
         (time.time(), job_id)
     )
-    DB.commit()
+    get_db().commit()
 
 
 def finish_job(job_id, status, result):
-    DB.execute(
+    get_db().execute(
         "UPDATE jobs SET status=?, result=?, updated=? WHERE id=?",
         (status, result, time.time(), job_id)
     )
-    DB.commit()
+    get_db().commit()
 
 
 def list_jobs():
-    rows = DB.execute(
+    rows = get_db().execute(
         "SELECT id,node_id,command,status,result FROM jobs"
     ).fetchall()
 
@@ -138,15 +171,15 @@ def list_jobs():
 
 
 def create_workload(name, command, replicas):
-    DB.execute(
+    get_db().execute(
         "INSERT OR REPLACE INTO workloads VALUES (?,?,?)",
         (name, command, replicas)
     )
-    DB.commit()
+    get_db().commit()
 
 
 def list_workloads():
-    rows = DB.execute(
+    rows = get_db().execute(
         "SELECT name,command,replicas FROM workloads"
     ).fetchall()
 

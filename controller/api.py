@@ -5,11 +5,17 @@ from controller.store import *
 
 app = FastAPI()
 
-@app.on_event("startup")
-async def start():
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app):
+
     init_db()
     asyncio.create_task(reconcile_loop())
 
+    yield
+
+app = FastAPI(lifespan=lifespan)
 
 @app.post("/register")
 def register(data: dict):
