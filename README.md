@@ -2,6 +2,9 @@
 
 Welcome to **Tiny Control Plane**, a small distributed systems playground written in Python.
 
+![Tests](https://github.com/yoramvandevelde/tiny-control-plane-vibecoded/actions/workflows/python-app.yml/badge.svg)
+![Python](https://img.shields.io/badge/python-3.10+-blue)
+
 This project demonstrates the core concepts behind real orchestrators such as:
 
 * Kubernetes
