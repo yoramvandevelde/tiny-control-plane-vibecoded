@@ -65,7 +65,12 @@ def reconcile_once():
             node_id = pick_node(nodes, w.get("constraints", {}), w.get("resources", {}))
             if node_id is None:
                 break
-            create_job(node_id, w["command"], workload_name=w["name"])
+            create_job(
+                node_id,
+                w["command"],
+                image=w.get("image"),
+                workload_name=w["name"],
+            )
 
 
 async def reconcile_loop():
@@ -107,7 +112,7 @@ def nodes():
 
 @app.post("/jobs")
 def job(data: dict):
-    jid = create_job(data["node"], data["command"])
+    jid = create_job(data["node"], data["command"], image=data.get("image"))
     return {"job": jid}
 
 
@@ -123,10 +128,10 @@ def agent_job(node: str):
     if not job:
         return {}
 
-    jid, cmd = job
+    jid, cmd, image = job
     start_job(jid)
 
-    return {"job": jid, "command": cmd}
+    return {"job": jid, "command": cmd, "image": image}
 
 
 @app.post("/agent/result")
@@ -141,8 +146,9 @@ def workload(data: dict):
         data["name"],
         data["command"],
         data["replicas"],
-        data.get("constraints"),
-        data.get("resources"),
+        image=data.get("image"),
+        constraints=data.get("constraints"),
+        resources=data.get("resources"),
     )
     return {"ok": True}
 

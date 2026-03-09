@@ -29,6 +29,7 @@ Somehow, this still resulted in:
 * label-based node selection
 * least-loaded binpacking
 * reconciliation loop
+* Docker container execution
 
 Which is suspiciously close to a real orchestrator.
 
@@ -42,6 +43,15 @@ Apparently vibecoding also has a patch cycle now.
 > "We fixed the reconciler. The tests were wrong.
 > Then the patch was wrong. Then the patch path was wrong.
 > Three iterations to fix four bugs. This is just software."
+
+Then Docker support was added. The agent gained the ability to pull and run
+containers. The first test command was `echo hello` in an Alpine image.
+
+It worked. We felt powerful. Then we noticed the jobs were stuck on `pending`
+because exceptions were silently swallowed and Docker wasn't running.
+
+> "Adding container orchestration to your orchestrator is straightforward.
+> Remembering to start Docker is optional, apparently."
 
 ---
 
@@ -113,7 +123,8 @@ Agents poll:
 GET /agent/jobs/<node>
 ```
 
-and execute commands locally.
+and execute the job locally — either as a shell command or inside a Docker
+container, depending on whether an image is specified.
 
 ---
 
@@ -127,7 +138,22 @@ Jobs are placed using:
 3. **Least-loaded selection** — among eligible nodes, the one with the
    lowest reported CPU usage is chosen
 
-This is real binpacking behaviour, not just picking the first node in a dict.
+This is a real scheduling pipeline: filter → score → pick.
+Which is exactly what Kubernetes does, minus 400 lines of Go per step.
+
+---
+
+### Docker Execution
+
+Jobs can run inside Docker containers. The agent uses `docker run --rm`
+so containers clean up after themselves.
+
+Containers run with `--network none` by default — no outbound access,
+no surprises.
+
+If no image is specified, the job runs as a plain shell command instead.
+Both modes coexist; the agent decides at execution time based on whether
+`image` is set.
 
 ---
 
@@ -146,8 +172,14 @@ If jobs finish or nodes disappear → the controller starts new ones.
 
 Workloads support label constraints, so you can pin replicas to a region:
 
-```python
-cli/tcp.py deploy eu-workers uptime 3 --constraints region=eu
+```bash
+python cli/tcp.py deploy eu-workers uptime 3 --constraint region=eu
+```
+
+Workloads also support Docker images:
+
+```bash
+python cli/tcp.py deploy alpine-workers "echo hello" 2 --image alpine
 ```
 
 This pattern is called **reconciliation**. It is the core of Kubernetes.
@@ -201,23 +233,61 @@ Watch cluster:
 python cli/tcp.py watch
 ```
 
-Run job:
+Run a shell job on a specific node:
 
 ```bash
 python cli/tcp.py exec node1 uptime
 ```
 
-Declare workload:
+Run a Docker job on a specific node:
+
+```bash
+python cli/tcp.py exec node1 "echo hello" --image alpine
+```
+
+Declare a shell workload:
 
 ```bash
 python cli/tcp.py deploy workers uptime 3
 ```
 
-Declare workload with label constraint:
+Declare a Docker workload:
 
 ```bash
-python cli/tcp.py deploy eu-workers uptime 3 --constraints region=eu
+python cli/tcp.py deploy alpine-workers "echo hello" 2 --image alpine
 ```
+
+Declare a workload with a label constraint:
+
+```bash
+python cli/tcp.py deploy eu-workers uptime 3 --constraint region=eu
+```
+
+List all jobs:
+
+```bash
+python cli/tcp.py jobs
+```
+
+---
+
+# Debugging Docker Jobs
+
+If Docker jobs are stuck on `pending`, check these in order:
+
+```bash
+# is Docker running?
+docker ps
+
+# did containers start and exit?
+docker ps -a
+
+# test the image manually
+docker run --rm --network none alpine echo hello
+```
+
+If nothing appears in `docker ps -a` while jobs sit pending, the agent is
+hitting a silent exception. Check the agent terminal output.
 
 ---
 
@@ -230,6 +300,10 @@ pytest
 Tests are synchronous and call `reconcile_once()` directly. No async timing,
 no `sleep(1)` and hope. Each test gets an isolated SQLite database via
 `tmp_path`.
+
+If tests fail with schema errors, delete `cluster.db` and restart the
+controller. The schema has evolved across versions and old database files
+will not have the right columns.
 
 ---
 
@@ -247,3 +321,5 @@ Also proof that vibecoding sometimes works.
 Do not tell the enterprise architects.
 
 Do not tell them about the patch cycle either.
+
+Do not tell them we added Docker support and immediately forgot to start Docker.

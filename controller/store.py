@@ -22,7 +22,6 @@ def init_db(path=None):
     global DB_PATH
     if path:
         DB_PATH = str(path)
-    # Force a fresh connection for the new path
     _local.conn = None
 
     db = get_db()
@@ -43,6 +42,7 @@ def init_db(path=None):
         id TEXT PRIMARY KEY,
         node_id TEXT,
         command TEXT,
+        image TEXT,
         workload_name TEXT,
         constraints TEXT,
         resources TEXT,
@@ -57,6 +57,7 @@ def init_db(path=None):
     CREATE TABLE IF NOT EXISTS workloads (
         name TEXT PRIMARY KEY,
         command TEXT,
+        image TEXT,
         replicas INTEGER,
         constraints TEXT,
         resources TEXT
@@ -114,20 +115,21 @@ def list_nodes():
     return result
 
 
-def create_job(node_id, command, workload_name=None):
+def create_job(node_id, command, image=None, workload_name=None):
     jid = str(uuid.uuid4())
     with _db_lock:
         get_db().execute(
             """
             INSERT INTO jobs (
-                id, node_id, command, workload_name,
+                id, node_id, command, image, workload_name,
                 constraints, resources, status, result, created, updated
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 jid,
                 node_id,
                 command,
+                image,
                 workload_name,
                 "{}",
                 "{}",
@@ -144,7 +146,7 @@ def create_job(node_id, command, workload_name=None):
 
 def get_pending_job(node_id):
     row = get_db().execute(
-        "SELECT id,command FROM jobs WHERE node_id=? AND status='pending' LIMIT 1",
+        "SELECT id, command, image FROM jobs WHERE node_id=? AND status='pending' LIMIT 1",
         (node_id,)
     ).fetchone()
     return row
@@ -170,7 +172,7 @@ def finish_job(job_id, status, result):
 
 def list_jobs():
     rows = get_db().execute(
-        "SELECT id,node_id,command,workload_name,status,result FROM jobs"
+        "SELECT id, node_id, command, image, workload_name, status, result FROM jobs"
     ).fetchall()
 
     return [
@@ -178,9 +180,10 @@ def list_jobs():
             "id": r[0],
             "node": r[1],
             "command": r[2],
-            "workload_name": r[3],
-            "status": r[4],
-            "result": r[5],
+            "image": r[3],
+            "workload_name": r[4],
+            "status": r[5],
+            "result": r[6],
         }
         for r in rows
     ]
@@ -197,27 +200,28 @@ def count_active_workload_jobs(workload_name):
     return row[0]
 
 
-def create_workload(name, command, replicas, constraints=None, resources=None):
+def create_workload(name, command, replicas, image=None, constraints=None, resources=None):
     with _db_lock:
         get_db().execute(
-            "INSERT OR REPLACE INTO workloads VALUES (?,?,?,?,?)",
-            (name, command, replicas, json.dumps(constraints or {}), json.dumps(resources or {}))
+            "INSERT OR REPLACE INTO workloads VALUES (?,?,?,?,?,?)",
+            (name, command, image, replicas, json.dumps(constraints or {}), json.dumps(resources or {}))
         )
         get_db().commit()
 
 
 def list_workloads():
     rows = get_db().execute(
-        "SELECT name,command,replicas,constraints,resources FROM workloads"
+        "SELECT name, command, image, replicas, constraints, resources FROM workloads"
     ).fetchall()
 
     return [
         {
             "name": r[0],
             "command": r[1],
-            "replicas": r[2],
-            "constraints": json.loads(r[3]) if r[3] else {},
-            "resources": json.loads(r[4]) if r[4] else {},
+            "image": r[2],
+            "replicas": r[3],
+            "constraints": json.loads(r[4]) if r[4] else {},
+            "resources": json.loads(r[5]) if r[5] else {},
         }
         for r in rows
     ]

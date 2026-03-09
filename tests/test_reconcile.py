@@ -36,7 +36,7 @@ def test_reconcile_is_idempotent(tmp_path):
     create_workload("workers", "uptime", 3)
 
     reconcile_once()
-    reconcile_once()  # should not create extra jobs
+    reconcile_once()
 
     assert len(list_jobs()) == 3
 
@@ -46,7 +46,7 @@ def test_reconcile_two_workloads_dont_interfere(tmp_path):
 
     register_node("node1", "http://localhost:9000", capacity={"cpu": 4, "mem": 8192})
     create_workload("workers", "uptime", 2)
-    create_workload("checkers", "uptime", 1)  # same command, different workload
+    create_workload("checkers", "uptime", 1)
 
     reconcile_once()
 
@@ -78,3 +78,17 @@ def test_reconcile_skips_when_no_matching_node(tmp_path):
     reconcile_once()
 
     assert list_jobs() == []
+
+
+def test_reconcile_docker_workload_passes_image(tmp_path):
+    _setup(tmp_path)
+
+    register_node("node1", "http://localhost:9000", capacity={"cpu": 4, "mem": 8192})
+    create_workload("containers", "echo hello", 2, image="alpine")
+
+    reconcile_once()
+
+    jobs = list_jobs()
+    assert len(jobs) == 2
+    assert all(j["image"] == "alpine" for j in jobs)
+    assert all(j["command"] == "echo hello" for j in jobs)
