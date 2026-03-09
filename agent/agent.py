@@ -3,6 +3,7 @@ import socket, psutil, httpx, subprocess, argparse, time, threading, queue
 parser = argparse.ArgumentParser()
 parser.add_argument("--node-id", default=socket.gethostname())
 parser.add_argument("--port", type=int, default=9000)
+parser.add_argument("--label",action="append",help="Node labels: key=value")
 args = parser.parse_args()
 
 CONTROLLER = "http://localhost:8000"
@@ -20,6 +21,12 @@ _results: queue.Queue = queue.Queue()
 _running_jobs: set = set()
 _running_lock = threading.Lock()
 
+def parse_labels(label_args):
+    labels = {}
+    for l in label_args or []:
+        k, _, v = l.partition("=")
+        labels[k] = v
+    return labels
 
 def state():
     disk = psutil.disk_usage("/")
@@ -34,9 +41,12 @@ def state():
 def register():
     httpx.post(
         f"{CONTROLLER}/register",
-        json={"node": node, "address": f"http://localhost:{args.port}"}
+        json={
+            "node": node,
+            "address": f"http://localhost:{args.port}",
+            "labels": parse_labels(args.label),
+        }
     )
-
 
 def run_shell(command: str) -> str:
     return subprocess.check_output(
@@ -74,7 +84,7 @@ def send_logs(job_id: str, output: str):
             httpx.post(
                 f"{CONTROLLER}/agent/log",
                 json={"job": job_id, "line": line},
-                timeout=2,
+                timeout=1,
             )
         except Exception:
             pass
@@ -106,7 +116,7 @@ def send_heartbeats():
 
     for job_id in job_ids:
         try:
-            httpx.post(f"{CONTROLLER}/agent/heartbeat/{job_id}", timeout=2)
+            httpx.post(f"{CONTROLLER}/agent/heartbeat/{job_id}", timeout=1)
         except Exception:
             pass
 
@@ -156,7 +166,7 @@ def loop():
         except Exception as e:
             print(f"[agent] error: {e}")
 
-        time.sleep(2)
+        time.sleep(1)
 
 
 if __name__ == "__main__":
