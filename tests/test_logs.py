@@ -19,3 +19,14 @@ def test_store_and_fetch_logs(tmp_path):
     assert len(logs) == 2
     assert logs[0]["line"] == "hello"
     assert logs[1]["line"] == "world"
+
+def test_logs_are_isolated_per_job(tmp_path):
+    os.chdir(tmp_path)
+    init_db()
+
+    store_log("job1", "from job1")
+    store_log("job2", "from job2")
+
+    assert len(get_logs("job1")) == 1
+    assert get_logs("job1")[0]["line"] == "from job1"
+    assert len(get_logs("job2")) == 1
