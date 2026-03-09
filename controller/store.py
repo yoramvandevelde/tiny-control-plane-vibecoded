@@ -8,16 +8,22 @@ DB_PATH = "cluster.db"
 
 
 def get_db():
-    if not hasattr(_local, "conn") or _local.conn is None:
-        _local.conn = sqlite3.connect(DB_PATH, check_same_thread=True)
+    path = DB_PATH
+    if not hasattr(_local, "conn") or _local.conn is None or _local.db_path != path:
+        if hasattr(_local, "conn") and _local.conn is not None:
+            _local.conn.close()
+        _local.conn = sqlite3.connect(path, check_same_thread=True)
         _local.conn.row_factory = sqlite3.Row
+        _local.db_path = path
     return _local.conn
 
 
 def init_db(path=None):
     global DB_PATH
     if path:
-        DB_PATH = path
+        DB_PATH = str(path)
+    # Force a fresh connection for the new path
+    _local.conn = None
 
     db = get_db()
     db.execute("""
@@ -71,7 +77,7 @@ def register_node(node_id, address, labels=None, capacity=None):
                 json.dumps(capacity or {}),
                 1,
                 time.time(),
-                None
+                None,
             )
         )
         get_db().commit()
@@ -95,7 +101,6 @@ def list_nodes():
     ).fetchall()
 
     result = {}
-
     for r in rows:
         result[r[0]] = {
             "address": r[1],
@@ -168,19 +173,17 @@ def list_jobs():
         "SELECT id,node_id,command,workload_name,status,result FROM jobs"
     ).fetchall()
 
-    result = []
-
-    for r in rows:
-        result.append({
+    return [
+        {
             "id": r[0],
             "node": r[1],
             "command": r[2],
             "workload_name": r[3],
             "status": r[4],
             "result": r[5],
-        })
-
-    return result
+        }
+        for r in rows
+    ]
 
 
 def count_active_workload_jobs(workload_name):

@@ -26,7 +26,7 @@ def pick_node(nodes: dict, constraints: dict, resources: dict) -> str | None:
     Select a node using:
     1. Only healthy, recently-seen nodes
     2. Label constraint matching
-    3. Least-loaded (by CPU) among candidates — simple binpacking proxy
+    3. Least-loaded (by CPU) among candidates
     """
     now = time.time()
     candidates = []
@@ -50,6 +50,32 @@ def pick_node(nodes: dict, constraints: dict, resources: dict) -> str | None:
 
     candidates.sort(key=lambda x: x[0])
     return candidates[0][1]
+
+
+def reconcile_once():
+    """Run a single reconcile pass. Extracted so tests can call it directly."""
+    workloads = list_workloads()
+    nodes = list_nodes()
+
+    for w in workloads:
+        running = count_active_workload_jobs(w["name"])
+        missing = w["replicas"] - running
+
+        for _ in range(missing):
+            node_id = pick_node(nodes, w.get("constraints", {}), w.get("resources", {}))
+            if node_id is None:
+                break
+            create_job(node_id, w["command"], workload_name=w["name"])
+
+
+async def reconcile_loop():
+    while True:
+        try:
+            reconcile_once()
+        except Exception as e:
+            print(f"[reconcile] error: {e}")
+
+        await asyncio.sleep(5)
 
 
 @asynccontextmanager
@@ -124,26 +150,3 @@ def workload(data: dict):
 @app.get("/workloads")
 def workloads():
     return list_workloads()
-
-
-async def reconcile_loop():
-    while True:
-        try:
-            workloads = list_workloads()
-            nodes = list_nodes()
-
-            for w in workloads:
-                running = count_active_workload_jobs(w["name"])
-                missing = w["replicas"] - running
-
-                for _ in range(missing):
-                    node_id = pick_node(nodes, w.get("constraints", {}), w.get("resources", {}))
-                    if node_id is None:
-                        break
-                    create_job(node_id, w["command"], workload_name=w["name"])
-
-        except Exception as e:
-            # Log but don't crash the loop
-            print(f"[reconcile] error: {e}")
-
-        await asyncio.sleep(5)
