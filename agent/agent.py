@@ -1,4 +1,4 @@
-import socket, psutil, httpx, subprocess, argparse, time, threading, queue, os, sys, signal
+import socket, psutil, httpx, subprocess, argparse, time, threading, queue, os, sys, signal, tempfile
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--node-id", default=socket.gethostname())
@@ -99,10 +99,10 @@ def run_shell(command: str) -> tuple[subprocess.Popen, str]:
 
 def run_docker(image: str, command: str) -> tuple[str, str]:
     """Returns (container_id, output)."""
-    # Use --cidfile to capture the container ID for later cancellation
-    import tempfile
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".cid") as f:
-        cidfile = f.name
+    # Use --cidfile to capture the container ID for later cancellation.
+    # mktemp gives us a path without creating the file — Docker requires the
+    # cidfile to not exist before it starts.
+    cidfile = tempfile.mktemp(suffix=".cid")
 
     cmd = ["docker", "run", "--rm", "--network", "none", f"--cidfile={cidfile}", image]
     if command:
