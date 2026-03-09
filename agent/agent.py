@@ -85,7 +85,7 @@ def loop():
                     }
                 )
 
-        except Exception:
+        except Exception as e:
             print(f"[agent] error: {e}")    
             pass
 
