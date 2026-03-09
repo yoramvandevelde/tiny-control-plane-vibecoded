@@ -1,4 +1,3 @@
-
 import socket, psutil, httpx, subprocess, argparse, time
 
 parser = argparse.ArgumentParser()
@@ -8,6 +7,10 @@ args = parser.parse_args()
 
 CONTROLLER = "http://localhost:8000"
 node = args.node_id
+
+# Mirror the controller's status strings so we speak the same language
+STATUS_SUCCEEDED = "succeeded"
+STATUS_FAILED    = "failed"
 
 
 def state():
@@ -39,7 +42,7 @@ def run_docker(image: str, command: str) -> str:
     """
     Run a container to completion and return its stdout+stderr.
     --rm cleans up automatically.
-    No network, no privilege — keeps it simple and safe-ish.
+    No network, no privilege -- keeps it simple and safe-ish.
     """
     cmd = ["docker", "run", "--rm", "--network", "none", image]
     if command:
@@ -61,9 +64,10 @@ def execute(job: dict) -> tuple[str, str]:
             out = run_docker(job["image"], job["command"])
         else:
             out = run_shell(job["command"])
-        return "finished", out
+        return STATUS_SUCCEEDED, out
     except subprocess.CalledProcessError as e:
-        return "failed", e.output.decode() if e.output else str(e)
+        return STATUS_FAILED, e.output.decode() if e.output else str(e)
+
 
 def send_logs(job_id: str, output: str):
     for line in output.splitlines():
@@ -75,6 +79,7 @@ def send_logs(job_id: str, output: str):
             )
         except Exception:
             pass
+
 
 def loop():
     while True:
@@ -109,8 +114,8 @@ def loop():
                     }
                 )
 
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[agent] error: {e}")
 
         time.sleep(2)
 

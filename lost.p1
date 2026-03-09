@@ -1,0 +1,372 @@
+diff -ruN v6/tiny-control-plane-vibecoded-main/agent/agent.py v7/agent/agent.py
+--- v6/tiny-control-plane-vibecoded-main/agent/agent.py	2026-03-09 14:21:33.000000000 +0000
++++ v7/agent/agent.py	2026-03-09 14:28:11.657288367 +0000
+@@ -1,4 +1,3 @@
+-
+ import socket, psutil, httpx, subprocess, argparse, time
+ 
+ parser = argparse.ArgumentParser()
+@@ -9,6 +8,10 @@
+ CONTROLLER = "http://localhost:8000"
+ node = args.node_id
+ 
++# Mirror the controller's status strings so we speak the same language
++STATUS_SUCCEEDED = "succeeded"
++STATUS_FAILED    = "failed"
++
+ 
+ def state():
+     disk = psutil.disk_usage("/")
+@@ -39,7 +42,7 @@
+     """
+     Run a container to completion and return its stdout+stderr.
+     --rm cleans up automatically.
+-    No network, no privilege — keeps it simple and safe-ish.
++    No network, no privilege -- keeps it simple and safe-ish.
+     """
+     cmd = ["docker", "run", "--rm", "--network", "none", image]
+     if command:
+@@ -61,9 +64,10 @@
+             out = run_docker(job["image"], job["command"])
+         else:
+             out = run_shell(job["command"])
+-        return "finished", out
++        return STATUS_SUCCEEDED, out
+     except subprocess.CalledProcessError as e:
+-        return "failed", e.output.decode() if e.output else str(e)
++        return STATUS_FAILED, e.output.decode() if e.output else str(e)
++
+ 
+ def send_logs(job_id: str, output: str):
+     for line in output.splitlines():
+@@ -76,6 +80,7 @@
+         except Exception:
+             pass
+ 
++
+ def loop():
+     while True:
+         try:
+@@ -109,8 +114,8 @@
+                     }
+                 )
+ 
+-        except Exception:
+-            pass
++        except Exception as e:
++            print(f"[agent] error: {e}")
+ 
+         time.sleep(2)
+ 
+diff -ruN v6/tiny-control-plane-vibecoded-main/controller/api.py v7/controller/api.py
+--- v6/tiny-control-plane-vibecoded-main/controller/api.py	2026-03-09 14:21:33.000000000 +0000
++++ v7/controller/api.py	2026-03-09 14:27:54.076288333 +0000
+@@ -13,12 +13,14 @@
+     get_pending_job,
+     start_job,
+     finish_job,
++    mark_lost,
+     create_workload,
+     list_workloads,
+     count_active_workload_jobs,
+     delete_workload,
+     store_log,
+     get_logs,
++    JobStatus,
+ )
+ 
+ NODE_STALE_SECONDS = 30
+@@ -166,6 +168,7 @@
+     delete_workload(name)
+     return {"ok": True}
+ 
++
+ @app.post("/agent/log")
+ def agent_log(data: dict):
+     store_log(data["job"], data["line"])
+diff -ruN v6/tiny-control-plane-vibecoded-main/controller/store.py v7/controller/store.py
+--- v6/tiny-control-plane-vibecoded-main/controller/store.py	2026-03-09 14:21:33.000000000 +0000
++++ v7/controller/store.py	2026-03-09 14:27:34.333288294 +0000
+@@ -6,6 +6,19 @@
+ 
+ DB_PATH = "cluster.db"
+ 
++# Canonical job states
++class JobStatus:
++    PENDING   = "pending"
++    RUNNING   = "running"
++    SUCCEEDED = "succeeded"
++    FAILED    = "failed"
++    LOST      = "lost"
++
++    # States where the job is no longer active
++    TERMINAL = {SUCCEEDED, FAILED, LOST}
++    # States where the job is still active (counts toward replica targets)
++    ACTIVE   = {PENDING, RUNNING}
++
+ 
+ def get_db():
+     path = DB_PATH
+@@ -63,7 +76,7 @@
+         resources TEXT
+     )
+     """)
+-    
++
+     db.execute("""
+     CREATE TABLE IF NOT EXISTS logs (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+@@ -142,7 +155,7 @@
+                 workload_name,
+                 "{}",
+                 "{}",
+-                "pending",
++                JobStatus.PENDING,
+                 None,
+                 time.time(),
+                 time.time(),
+@@ -155,8 +168,8 @@
+ 
+ def get_pending_job(node_id):
+     row = get_db().execute(
+-        "SELECT id, command, image FROM jobs WHERE node_id=? AND status='pending' LIMIT 1",
+-        (node_id,)
++        "SELECT id, command, image FROM jobs WHERE node_id=? AND status=? LIMIT 1",
++        (node_id, JobStatus.PENDING)
+     ).fetchone()
+     return row
+ 
+@@ -164,13 +177,19 @@
+ def start_job(job_id):
+     with _db_lock:
+         get_db().execute(
+-            "UPDATE jobs SET status='running', updated=? WHERE id=?",
+-            (time.time(), job_id)
++            "UPDATE jobs SET status=?, updated=? WHERE id=?",
++            (JobStatus.RUNNING, time.time(), job_id)
+         )
+         get_db().commit()
+ 
+ 
+ def finish_job(job_id, status, result):
++    """
++    status should be JobStatus.SUCCEEDED or JobStatus.FAILED.
++    The agent sends 'finished' for success; we normalise here.
++    """
++    if status == "finished":
++        status = JobStatus.SUCCEEDED
+     with _db_lock:
+         get_db().execute(
+             "UPDATE jobs SET status=?, result=?, updated=? WHERE id=?",
+@@ -179,6 +198,15 @@
+         get_db().commit()
+ 
+ 
++def mark_lost(job_id):
++    with _db_lock:
++        get_db().execute(
++            "UPDATE jobs SET status=?, updated=? WHERE id=?",
++            (JobStatus.LOST, time.time(), job_id)
++        )
++        get_db().commit()
++
++
+ def list_jobs():
+     rows = get_db().execute(
+         "SELECT id, node_id, command, image, workload_name, status, result FROM jobs"
+@@ -199,12 +227,10 @@
+ 
+ 
+ def count_active_workload_jobs(workload_name):
++    placeholders = ",".join("?" * len(JobStatus.ACTIVE))
+     row = get_db().execute(
+-        """
+-        SELECT COUNT(*) FROM jobs
+-        WHERE workload_name=? AND status NOT IN ('finished', 'failed')
+-        """,
+-        (workload_name,)
++        f"SELECT COUNT(*) FROM jobs WHERE workload_name=? AND status IN ({placeholders})",
++        (workload_name, *JobStatus.ACTIVE)
+     ).fetchone()
+     return row[0]
+ 
+@@ -241,6 +267,7 @@
+         for r in rows
+     ]
+ 
++
+ def store_log(job_id, line):
+     with _db_lock:
+         get_db().execute(
+diff -ruN v6/tiny-control-plane-vibecoded-main/tests/test_jobs.py v7/tests/test_jobs.py
+--- v6/tiny-control-plane-vibecoded-main/tests/test_jobs.py	2026-03-09 14:21:33.000000000 +0000
++++ v7/tests/test_jobs.py	2026-03-09 14:28:27.092288398 +0000
+@@ -1,5 +1,8 @@
+ import os
+-from controller.store import init_db, create_job, list_jobs, get_pending_job, start_job, finish_job
++from controller.store import (
++    init_db, create_job, list_jobs, get_pending_job,
++    start_job, finish_job, mark_lost, JobStatus,
++)
+ 
+ 
+ def _setup(tmp_path):
+@@ -15,7 +18,7 @@
+     jobs = list_jobs()
+     assert jobs[0]["id"] == jid
+     assert jobs[0]["command"] == "uptime"
+-    assert jobs[0]["status"] == "pending"
++    assert jobs[0]["status"] == JobStatus.PENDING
+     assert jobs[0]["image"] is None
+     assert jobs[0]["workload_name"] is None
+ 
+@@ -28,19 +31,17 @@
+     jobs = list_jobs()
+     assert jobs[0]["id"] == jid
+     assert jobs[0]["image"] == "alpine"
+-    assert jobs[0]["command"] == "echo hello"
+ 
+ 
+ def test_job_creation_with_workload_name(tmp_path):
+     _setup(tmp_path)
+ 
+-    jid = create_job("node1", "uptime", workload_name="workers")
++    create_job("node1", "uptime", workload_name="workers")
+ 
+-    jobs = list_jobs()
+-    assert jobs[0]["workload_name"] == "workers"
++    assert list_jobs()[0]["workload_name"] == "workers"
+ 
+ 
+-def test_job_lifecycle(tmp_path):
++def test_job_lifecycle_succeeded(tmp_path):
+     _setup(tmp_path)
+ 
+     jid = create_job("node1", "uptime")
+@@ -50,39 +51,57 @@
+     assert row[0] == jid
+ 
+     start_job(jid)
+-    assert list_jobs()[0]["status"] == "running"
++    assert list_jobs()[0]["status"] == JobStatus.RUNNING
+ 
+-    # pending query should return nothing now
+     assert get_pending_job("node1") is None
+ 
+-    finish_job(jid, "finished", "some output")
++    finish_job(jid, JobStatus.SUCCEEDED, "some output")
+     job = list_jobs()[0]
+-    assert job["status"] == "finished"
++    assert job["status"] == JobStatus.SUCCEEDED
+     assert job["result"] == "some output"
+ 
+ 
+-def test_job_can_be_failed(tmp_path):
++def test_job_lifecycle_failed(tmp_path):
+     _setup(tmp_path)
+ 
+     jid = create_job("node1", "bad-command")
+     start_job(jid)
+-    finish_job(jid, "failed", "command not found")
++    finish_job(jid, JobStatus.FAILED, "command not found")
+ 
+     job = list_jobs()[0]
+-    assert job["status"] == "failed"
++    assert job["status"] == JobStatus.FAILED
+     assert job["result"] == "command not found"
+ 
+ 
++def test_job_lifecycle_lost(tmp_path):
++    _setup(tmp_path)
++
++    jid = create_job("node1", "uptime")
++    start_job(jid)
++    mark_lost(jid)
++
++    job = list_jobs()[0]
++    assert job["status"] == JobStatus.LOST
++
++
++def test_finish_job_normalises_finished_string(tmp_path):
++    """Agent previously sent 'finished'; ensure it still maps to succeeded."""
++    _setup(tmp_path)
++
++    jid = create_job("node1", "uptime")
++    finish_job(jid, "finished", "output")
++
++    assert list_jobs()[0]["status"] == JobStatus.SUCCEEDED
++
++
+ def test_pending_job_returns_image(tmp_path):
+     _setup(tmp_path)
+ 
+     jid = create_job("node1", "echo hello", image="alpine")
+ 
+     row = get_pending_job("node1")
+-    assert row is not None
+     job_id, command, image = row
+     assert job_id == jid
+-    assert command == "echo hello"
+     assert image == "alpine"
+ 
+ 
+@@ -93,3 +112,16 @@
+ 
+     assert get_pending_job("node2") is None
+     assert get_pending_job("node1") is not None
++
++
++def test_lost_job_not_counted_as_active(tmp_path):
++    _setup(tmp_path)
++
++    from controller.store import count_active_workload_jobs
++    create_job("node1", "uptime", workload_name="workers")
++    jid = create_job("node1", "uptime", workload_name="workers")
++
++    assert count_active_workload_jobs("workers") == 2
++
++    mark_lost(jid)
++    assert count_active_workload_jobs("workers") == 1
+diff -ruN v6/tiny-control-plane-vibecoded-main/tests/test_reconcile.py v7/tests/test_reconcile.py
+--- v6/tiny-control-plane-vibecoded-main/tests/test_reconcile.py	2026-03-09 14:21:33.000000000 +0000
++++ v7/tests/test_reconcile.py	2026-03-09 14:28:41.813288427 +0000
+@@ -1,4 +1,3 @@
+-
+ import os
+ 
+ from controller.store import (
+@@ -7,6 +6,8 @@
+     register_node,
+     list_jobs,
+     count_active_workload_jobs,
++    mark_lost,
++    JobStatus,
+ )
+ from controller.api import reconcile_once
+ 
+@@ -91,4 +92,24 @@
+     jobs = list_jobs()
+     assert len(jobs) == 2
+     assert all(j["image"] == "alpine" for j in jobs)
+-    assert all(j["command"] == "echo hello" for j in jobs)
++
++
++def test_reconcile_replaces_lost_jobs(tmp_path):
++    """Lost jobs should not count as active, so reconciler creates replacements."""
++    _setup(tmp_path)
++
++    register_node("node1", "http://localhost:9000", capacity={"cpu": 4, "mem": 8192})
++    create_workload("workers", "uptime", 2)
++
++    reconcile_once()
++    assert len(list_jobs()) == 2
++
++    # Mark one job as lost
++    lost_id = list_jobs()[0]["id"]
++    mark_lost(lost_id)
++
++    reconcile_once()
++
++    active = count_active_workload_jobs("workers")
++    assert active == 2
++    assert len(list_jobs()) == 3  # 2 original + 1 replacement

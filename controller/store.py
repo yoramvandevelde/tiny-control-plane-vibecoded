@@ -6,6 +6,19 @@ _db_lock = threading.Lock()
 
 DB_PATH = "cluster.db"
 
+# Canonical job states
+class JobStatus:
+    PENDING   = "pending"
+    RUNNING   = "running"
+    SUCCEEDED = "succeeded"
+    FAILED    = "failed"
+    LOST      = "lost"
+
+    # States where the job is no longer active
+    TERMINAL = {SUCCEEDED, FAILED, LOST}
+    # States where the job is still active (counts toward replica targets)
+    ACTIVE   = {PENDING, RUNNING}
+
 
 def get_db():
     path = DB_PATH
@@ -63,7 +76,7 @@ def init_db(path=None):
         resources TEXT
     )
     """)
-    
+
     db.execute("""
     CREATE TABLE IF NOT EXISTS logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -142,7 +155,7 @@ def create_job(node_id, command, image=None, workload_name=None):
                 workload_name,
                 "{}",
                 "{}",
-                "pending",
+                JobStatus.PENDING,
                 None,
                 time.time(),
                 time.time(),
@@ -155,8 +168,8 @@ def create_job(node_id, command, image=None, workload_name=None):
 
 def get_pending_job(node_id):
     row = get_db().execute(
-        "SELECT id, command, image FROM jobs WHERE node_id=? AND status='pending' LIMIT 1",
-        (node_id,)
+        "SELECT id, command, image FROM jobs WHERE node_id=? AND status=? LIMIT 1",
+        (node_id, JobStatus.PENDING)
     ).fetchone()
     return row
 
@@ -164,17 +177,32 @@ def get_pending_job(node_id):
 def start_job(job_id):
     with _db_lock:
         get_db().execute(
-            "UPDATE jobs SET status='running', updated=? WHERE id=?",
-            (time.time(), job_id)
+            "UPDATE jobs SET status=?, updated=? WHERE id=?",
+            (JobStatus.RUNNING, time.time(), job_id)
         )
         get_db().commit()
 
 
 def finish_job(job_id, status, result):
+    """
+    status should be JobStatus.SUCCEEDED or JobStatus.FAILED.
+    The agent sends 'finished' for success; we normalise here.
+    """
+    if status == "finished":
+        status = JobStatus.SUCCEEDED
     with _db_lock:
         get_db().execute(
             "UPDATE jobs SET status=?, result=?, updated=? WHERE id=?",
             (status, result, time.time(), job_id)
+        )
+        get_db().commit()
+
+
+def mark_lost(job_id):
+    with _db_lock:
+        get_db().execute(
+            "UPDATE jobs SET status=?, updated=? WHERE id=?",
+            (JobStatus.LOST, time.time(), job_id)
         )
         get_db().commit()
 
@@ -199,12 +227,10 @@ def list_jobs():
 
 
 def count_active_workload_jobs(workload_name):
+    placeholders = ",".join("?" * len(JobStatus.ACTIVE))
     row = get_db().execute(
-        """
-        SELECT COUNT(*) FROM jobs
-        WHERE workload_name=? AND status NOT IN ('finished', 'failed')
-        """,
-        (workload_name,)
+        f"SELECT COUNT(*) FROM jobs WHERE workload_name=? AND status IN ({placeholders})",
+        (workload_name, *JobStatus.ACTIVE)
     ).fetchone()
     return row[0]
 
@@ -240,6 +266,7 @@ def list_workloads():
         }
         for r in rows
     ]
+
 
 def store_log(job_id, line):
     with _db_lock:

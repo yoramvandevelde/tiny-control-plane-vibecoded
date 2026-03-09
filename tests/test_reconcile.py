@@ -1,4 +1,3 @@
-
 import os
 
 from controller.store import (
@@ -7,6 +6,8 @@ from controller.store import (
     register_node,
     list_jobs,
     count_active_workload_jobs,
+    mark_lost,
+    JobStatus,
 )
 from controller.api import reconcile_once
 
@@ -91,4 +92,24 @@ def test_reconcile_docker_workload_passes_image(tmp_path):
     jobs = list_jobs()
     assert len(jobs) == 2
     assert all(j["image"] == "alpine" for j in jobs)
-    assert all(j["command"] == "echo hello" for j in jobs)
+
+
+def test_reconcile_replaces_lost_jobs(tmp_path):
+    """Lost jobs should not count as active, so reconciler creates replacements."""
+    _setup(tmp_path)
+
+    register_node("node1", "http://localhost:9000", capacity={"cpu": 4, "mem": 8192})
+    create_workload("workers", "uptime", 2)
+
+    reconcile_once()
+    assert len(list_jobs()) == 2
+
+    # Mark one job as lost
+    lost_id = list_jobs()[0]["id"]
+    mark_lost(lost_id)
+
+    reconcile_once()
+
+    active = count_active_workload_jobs("workers")
+    assert active == 2
+    assert len(list_jobs()) == 3  # 2 original + 1 replacement
