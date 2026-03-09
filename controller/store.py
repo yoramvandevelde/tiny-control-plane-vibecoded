@@ -267,6 +267,40 @@ def count_active_workload_jobs(workload_name):
     return row[0]
 
 
+def get_excess_workload_jobs(workload_name, keep):
+    """
+    Return job IDs for active jobs beyond the desired replica count.
+    Prefers to mark pending jobs lost before running ones.
+    """
+    placeholders = ",".join("?" * len(JobStatus.ACTIVE))
+    rows = get_db().execute(
+        f"""
+        SELECT id, status FROM jobs
+        WHERE workload_name=? AND status IN ({placeholders})
+        ORDER BY
+            CASE status WHEN 'pending' THEN 0 ELSE 1 END,
+            created DESC
+        """,
+        (workload_name, *JobStatus.ACTIVE)
+    ).fetchall()
+
+    excess = len(rows) - keep
+    if excess <= 0:
+        return []
+    return [r[0] for r in rows[:excess]]
+
+
+def update_workload_replicas(name, replicas):
+    """Update replica count for a workload. Returns True if found, False if not."""
+    with _db_lock:
+        cur = get_db().execute(
+            "UPDATE workloads SET replicas=? WHERE name=?",
+            (replicas, name)
+        )
+        get_db().commit()
+    return cur.rowcount > 0
+
+
 def create_workload(name, command, replicas, image=None, constraints=None, resources=None):
     with _db_lock:
         get_db().execute(

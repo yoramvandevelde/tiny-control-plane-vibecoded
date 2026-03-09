@@ -2,9 +2,6 @@
 
 Welcome to **Tiny Control Plane**, a small distributed systems playground written in Python.
 
-![Tests](https://github.com/yoramvandevelde/tiny-control-plane-vibecoded/actions/workflows/python-app.yml/badge.svg)
-![Python](https://img.shields.io/badge/python-3.10+-blue)
-
 This project demonstrates the core concepts behind real orchestrators such as:
 
 * Kubernetes
@@ -37,6 +34,7 @@ Somehow, this still resulted in:
 * formal job states with failure handling
 * job leases and lost job detection
 * a CLI that tells you what is actually happening
+* scaling workloads up and down
 
 Which is suspiciously close to a real orchestrator.
 
@@ -80,6 +78,14 @@ had an orchestrator with no dashboard, no status view, and a `jobs` command
 that printed raw JSON. The `status` command was added.
 
 Do not tell the enterprise architects any of this.
+
+Then someone asked: "can we scale back workers?" It turned out there was no
+way to reduce replicas without undeploying the whole workload. We added a
+`scale` command. Excess jobs are marked `lost` immediately — they keep running
+on the agent, but the controller stops pretending they count.
+
+> "Desired state is easy to declare.
+> Undesiring state is where it gets interesting."
 
 ---
 
@@ -265,6 +271,31 @@ counts.
 
 ---
 
+### Scaling Workloads
+
+To change the number of replicas for a running workload:
+
+```bash
+python cli/tcp.py scale workers 1
+```
+
+Scaling up schedules new jobs on the next reconcile pass. Scaling down marks
+excess active jobs as `lost` immediately — pending jobs are cancelled before
+running ones. The reconciler will not schedule replacements for lost jobs once
+the replica count is satisfied.
+
+Response:
+
+```json
+{"ok": true, "replicas": 1, "cancelled": 2}
+```
+
+Note: marking a job `lost` does not kill the subprocess on the agent. The
+agent will finish executing and post a result, which the controller will
+accept. Job cancellation at the process level is a future concern.
+
+---
+
 ### Stopping Workloads
 
 To stop a workload, undeploy it:
@@ -358,6 +389,12 @@ Stop a workload:
 
 ```bash
 python cli/tcp.py undeploy workers
+```
+
+Scale a workload:
+
+```bash
+python cli/tcp.py scale workers 1
 ```
 
 Show job status with elapsed times:
@@ -455,3 +492,6 @@ Do not tell them the scheduler was putting all jobs on the same node because
 
 Do not tell them we added `status` because someone asked "but what is it
 actually doing?" and the honest answer was "we have no idea, here is some JSON."
+
+Do not tell them scaling down marks jobs as `lost` while they keep running.
+The state is correct. The process is uninformed.

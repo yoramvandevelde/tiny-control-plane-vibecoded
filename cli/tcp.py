@@ -122,6 +122,12 @@ def deploy(
 
 
 @app.command()
+def scale(name: str, replicas: int):
+    r = httpx.post(f"{API}/workloads/{name}/scale", json={"replicas": replicas})
+    print(r.json())
+
+
+@app.command()
 def undeploy(name: str):
     r = httpx.delete(f"{API}/workloads/{name}")
     print(r.json())

@@ -21,6 +21,8 @@ from controller.store import (
     list_workloads,
     count_active_workload_jobs,
     count_active_node_jobs,
+    get_excess_workload_jobs,
+    update_workload_replicas,
     delete_workload,
     store_log,
     get_logs,
@@ -177,6 +179,21 @@ def workload(data: dict):
 @app.get("/workloads")
 def workloads():
     return list_workloads()
+
+
+@app.post("/workloads/{name}/scale")
+def scale_workload(name: str, data: dict):
+    replicas = data["replicas"]
+    updated = update_workload_replicas(name, replicas)
+    if not updated:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="workload not found")
+
+    excess = get_excess_workload_jobs(name, replicas)
+    for job_id in excess:
+        mark_lost(job_id)
+
+    return {"ok": True, "replicas": replicas, "cancelled": len(excess)}
 
 
 @app.delete("/workloads/{name}")
