@@ -295,6 +295,31 @@ python cli/tcp.py jobs
 
 ---
 
+## Logs
+
+Workload output is captured by agents and stored by the controller.
+
+You can retrieve logs for any job:
+
+```bash
+tcp logs <job_id>
+```
+
+Example:
+```bash
+$ tcp logs 6c1f5a4e
+starting worker
+processing item 1
+processing item 2
+done
+```
+
+Logs are collected from the workload's stdout and stored in the controller database.
+
+This works for both shell commands and Docker-based workloads.
+
+---
+
 # Running Tests
 
 ```bash

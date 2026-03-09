@@ -63,6 +63,12 @@ def undeploy(name: str):
     r = httpx.delete(f"{API}/workloads/{name}")
     print(r.json())
 
+@app.command()
+def logs(job: str):
+    r = httpx.get(f"{API}/jobs/{job}/logs")
+    for line in r.json():
+        print(line["line"])
+
 
 if __name__ == "__main__":
     app()

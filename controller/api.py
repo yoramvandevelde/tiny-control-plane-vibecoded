@@ -17,6 +17,8 @@ from controller.store import (
     list_workloads,
     count_active_workload_jobs,
     delete_workload,
+    store_log,
+    get_logs,
 )
 
 NODE_STALE_SECONDS = 30
@@ -163,3 +165,13 @@ def workloads():
 def remove_workload(name: str):
     delete_workload(name)
     return {"ok": True}
+
+@app.post("/agent/log")
+def agent_log(data: dict):
+    store_log(data["job"], data["line"])
+    return {"ok": True}
+
+
+@app.get("/jobs/{job_id}/logs")
+def job_logs(job_id: str):
+    return get_logs(job_id)

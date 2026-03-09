@@ -65,6 +65,16 @@ def execute(job: dict) -> tuple[str, str]:
     except subprocess.CalledProcessError as e:
         return "failed", e.output.decode() if e.output else str(e)
 
+def send_logs(job_id: str, output: str):
+    for line in output.splitlines():
+        try:
+            httpx.post(
+                f"{CONTROLLER}/agent/log",
+                json={"job": job_id, "line": line},
+                timeout=2,
+            )
+        except Exception:
+            pass
 
 def loop():
     while True:
@@ -85,6 +95,8 @@ def loop():
                     print(f"[{node}] running job {job_id}: shell: {command}")
 
                 status, result = execute(data)
+
+                send_logs(job_id, result)
 
                 print(f"[{node}] job {job_id}: {status}")
 

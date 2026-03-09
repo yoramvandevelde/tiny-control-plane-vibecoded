@@ -63,6 +63,15 @@ def init_db(path=None):
         resources TEXT
     )
     """)
+    
+    db.execute("""
+    CREATE TABLE IF NOT EXISTS logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id TEXT,
+        ts REAL,
+        line TEXT
+    )
+    """)
 
     db.commit()
 
@@ -231,3 +240,20 @@ def list_workloads():
         }
         for r in rows
     ]
+
+def store_log(job_id, line):
+    with _db_lock:
+        get_db().execute(
+            "INSERT INTO logs(job_id, ts, line) VALUES (?,?,?)",
+            (job_id, time.time(), line),
+        )
+        get_db().commit()
+
+
+def get_logs(job_id):
+    rows = get_db().execute(
+        "SELECT ts, line FROM logs WHERE job_id=? ORDER BY id",
+        (job_id,),
+    ).fetchall()
+
+    return [{"ts": r[0], "line": r[1]} for r in rows]
