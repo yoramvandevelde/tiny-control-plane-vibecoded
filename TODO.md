@@ -12,7 +12,7 @@
 
 - [X] **Operator endpoints have no authentication** — anyone on the network can deploy, undeploy, scale, or revoke nodes. Needs a design decision (static token, bearer token, mTLS) and implementation — the bootstrap token pattern already in place is a natural model to follow.
 
-- [ ] **Cancel signals are lost on controller restart** — the cancel queue lives in SQLite and is drained destructively. If the controller dies after enqueuing and before the agent polls, the signal is gone and the process keeps running until the agent dies or re-registers.
+- [X] **Cancel signals are lost on controller restart** — the cancel queue lives in SQLite and is drained destructively. If the controller dies after enqueuing and before the agent polls, the signal is gone and the process keeps running until the agent dies or re-registers.
 
 ## Performance
 
