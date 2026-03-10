@@ -120,10 +120,11 @@ class JobStatus:
     RUNNING   = "running"
     SUCCEEDED = "succeeded"
     FAILED    = "failed"
+    CANCELLED = "cancelled"
     LOST      = "lost"
 
     # Jobs in a terminal state will not be updated by finish_job.
-    TERMINAL = {SUCCEEDED, FAILED, LOST}
+    TERMINAL = {SUCCEEDED, FAILED, LOST, CANCELLED}
 
     # Jobs in an active state count toward workload replica targets.
     ACTIVE   = {PENDING, RUNNING}
@@ -287,7 +288,7 @@ def renew_lease(job_id: str):
 def finish_job(job_id: str, status: str, result: str):
     """
     Record the final status and output of a job.
-    If the job is already in a terminal state (e.g. marked lost by the
+    If the job is already in a terminal state (e.g. marked cancelled or lost by the
     reconciler before the agent posted its result), this is a no-op.
     """
     if status == "finished":
@@ -316,13 +317,18 @@ def mark_lost(job_id: str):
 
 
 def mark_cancelled(job_id: str, node_id: str):
-    """Mark a job as LOST due to an explicit operator cancellation."""
+    """
+    Mark a job as CANCELLED due to an explicit operator action.
+    Only transitions from a non-terminal state — late agent results will
+    not overwrite this status.
+    """
     with _db_lock:
         row = get_db().execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
         prev_status = row[0] if row else "unknown"
+        placeholders = ",".join("?" * len(JobStatus.TERMINAL))
         get_db().execute(
-            "UPDATE jobs SET status=?, updated=? WHERE id=?",
-            (JobStatus.LOST, time.time(), job_id),
+            f"UPDATE jobs SET status=?, updated=? WHERE id=? AND status NOT IN ({placeholders})",
+            (JobStatus.CANCELLED, time.time(), job_id, *JobStatus.TERMINAL),
         )
         get_db().commit()
     record_event("job.cancelled", f"job {job_id} {prev_status} → cancelled on {node_id}")

@@ -49,6 +49,9 @@ STARTUP_GRACE_SECONDS = 60
 
 _startup_time: float = 0.0
 
+# Terminal statuses at which a log stream should close.
+_STREAM_TERMINAL = {JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.LOST, JobStatus.CANCELLED}
+
 
 # ---------------------------------------------------------------------------
 # Auth helpers
@@ -114,7 +117,7 @@ def pick_node(nodes: dict, constraints: dict, resources: dict) -> str | None:
 # ---------------------------------------------------------------------------
 
 def cancel_job(job_id: str, node_id: str):
-    """Mark a job as LOST due to explicit operator action and enqueue a cancellation signal."""
+    """Mark a job as CANCELLED due to explicit operator action and enqueue a cancellation signal."""
     mark_cancelled(job_id, node_id)
     enqueue_cancel(job_id, node_id)
 
@@ -301,8 +304,8 @@ async def job_logs_stream(job_id: str):
     """
     Stream log lines for a job using Server-Sent Events.
     Replays all existing lines first, then tails new ones as they arrive.
-    The stream closes automatically when the job reaches a terminal state
-    and all lines have been delivered.
+    The stream closes automatically when the job reaches any terminal state:
+    succeeded, failed, lost, or cancelled.
     """
     async def generator():
         cursor = 0
@@ -315,7 +318,7 @@ async def job_logs_stream(job_id: str):
             # Stop streaming once the job is terminal and we've sent all lines.
             job_list = list_jobs()
             job = next((j for j in job_list if j["id"] == job_id), None)
-            if job and job["status"] in ("succeeded", "failed", "lost"):
+            if job and job["status"] in _STREAM_TERMINAL:
                 break
 
             await asyncio.sleep(0.5)

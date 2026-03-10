@@ -20,6 +20,7 @@ STATUS_COLOUR = {
     "running":   "cyan",
     "succeeded": "green",
     "failed":    "red",
+    "cancelled": "yellow",
     "lost":      "magenta",
 }
 

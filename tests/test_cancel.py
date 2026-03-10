@@ -57,7 +57,7 @@ def test_pop_cancel_only_returns_for_correct_node(tmp_path):
     assert job_id in pop_cancel_jobs("node1")
 
 
-def test_cancel_job_marks_lost_and_enqueues(tmp_path):
+def test_cancel_job_marks_cancelled_and_enqueues(tmp_path):
     _setup(tmp_path)
 
     _ = register_node("node1", "http://localhost:9000")
@@ -68,7 +68,7 @@ def test_cancel_job_marks_lost_and_enqueues(tmp_path):
 
     from controller.store import list_jobs, JobStatus
     job = list_jobs()[0]
-    assert job["status"] == JobStatus.LOST
+    assert job["status"] == JobStatus.CANCELLED
 
     queued = pop_cancel_jobs("node1")
     assert job_id in queued
@@ -91,7 +91,7 @@ def test_enqueue_multiple_cancels(tmp_path):
 
 
 def test_reconciler_does_not_replace_cancelled_jobs(tmp_path):
-    """Cancelled jobs are marked lost; reconciler should fill back to replica count."""
+    """Cancelled jobs are marked cancelled; reconciler should fill back to replica count."""
     _setup(tmp_path)
 
     _ = register_node("node1", "http://localhost:9000", capacity={"cpu": 4, "mem": 8192})
@@ -128,6 +128,6 @@ def test_undeploy_cancels_active_jobs(tmp_path):
     delete_workload("workers")
 
     jobs = list_jobs()
-    assert all(j["status"] == JobStatus.LOST for j in jobs)
+    assert all(j["status"] == JobStatus.CANCELLED for j in jobs)
     queued = pop_cancel_jobs("node1")
     assert len(queued) == 2
