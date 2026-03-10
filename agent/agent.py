@@ -1,68 +1,92 @@
-import socket, psutil, httpx, subprocess, argparse, time, threading, queue, os, sys, signal, shlex
+import argparse
+import os
+import queue
+import shlex
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+import httpx
+import psutil
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--node-id", default=socket.gethostname())
-parser.add_argument("--port", type=int, default=9000)
-parser.add_argument("--label", action="append", help="Node labels: key=value")
+parser.add_argument("--port",    type=int, default=9000)
+parser.add_argument("--label",   action="append", help="Node label in key=value format")
 args = parser.parse_args()
 
-CONTROLLER = "http://localhost:8000"
-HEARTBEAT_INTERVAL = 15  # seconds between heartbeats while a job is running
+CONTROLLER         = "http://localhost:8000"
+HEARTBEAT_INTERVAL = 15  # seconds between heartbeat bursts while jobs are running
 
 node = args.node_id
 
 STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED    = "failed"
 
-# Queue for completed jobs: (job_id, status, result)
+# ---------------------------------------------------------------------------
+# Shared state
+# ---------------------------------------------------------------------------
+
+# Completed jobs waiting to be posted back to the controller.
 _results: queue.Queue = queue.Queue()
 
-# Set of job_ids currently being heartbeated
-_running_jobs: set = set()
-_running_lock = threading.Lock()
+# Job IDs currently executing — used to send heartbeats.
+_running_jobs: set     = set()
+_running_lock          = threading.Lock()
 
-# Set after successful registration
+# Per-job process handles for cancellation.
+# Values are ("shell", Popen) or ("docker", container_name).
+_processes:      dict  = {}
+_processes_lock        = threading.Lock()
+
+# Set after successful registration.
 _node_token: str | None = None
 
-# Set to True if the controller rejects our token — triggers clean exit
-_revoked = False
 
-
-def _handle_revocation():
-    print(f"[{node}] node token rejected by controller — this node has been revoked")
-    print(f"[{node}] shutting down; restart the agent to re-register")
-    sys.exit(1)
-
-# Map of job_id -> subprocess.Popen (shell) or container_id str (docker)
-_processes: dict = {}
-_processes_lock = threading.Lock()
-
+# ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
 
 def _headers() -> dict:
+    """Return auth headers for requests to the controller."""
     if _node_token:
         return {"X-Node-Token": _node_token}
     return {}
 
 
-def parse_labels(label_args):
+def _handle_revocation():
+    """Called when the controller rejects our token. Logs and exits cleanly."""
+    print(f"[{node}] node token rejected by controller — this node has been revoked")
+    print(f"[{node}] shutting down; restart the agent to re-register")
+    sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Registration
+# ---------------------------------------------------------------------------
+
+def parse_labels(label_args) -> dict:
+    """Parse a list of 'key=value' strings into a dict."""
     labels = {}
-    for l in label_args or []:
-        k, _, v = l.partition("=")
+    for label in label_args or []:
+        k, _, v = label.partition("=")
         labels[k] = v
     return labels
 
 
-def state():
-    disk = psutil.disk_usage("/")
-    return {
-        "node": node,
-        "cpu": psutil.cpu_percent() / 100,
-        "mem": psutil.virtual_memory().percent / 100,
-        "disk_free": disk.free / disk.total,
-    }
-
-
 def register():
+    """
+    Register this node with the controller using the bootstrap token.
+    Stores the returned per-node token for use in subsequent requests.
+    Exits immediately if the bootstrap token is missing or rejected.
+    """
     global _node_token
     bootstrap_token = os.environ.get("TCP_BOOTSTRAP_TOKEN", "")
     if not bootstrap_token:
@@ -72,9 +96,9 @@ def register():
     r = httpx.post(
         f"{CONTROLLER}/register",
         json={
-            "node": node,
+            "node":    node,
             "address": f"http://localhost:{args.port}",
-            "labels": parse_labels(args.label),
+            "labels":  parse_labels(args.label),
         },
         headers={"X-Bootstrap-Token": bootstrap_token},
     )
@@ -86,8 +110,32 @@ def register():
     print(f"[agent] registered as {node}")
 
 
+# ---------------------------------------------------------------------------
+# State reporting
+# ---------------------------------------------------------------------------
+
+def collect_state() -> dict:
+    """Collect current node metrics to report to the controller."""
+    disk = psutil.disk_usage("/")
+    return {
+        "node":      node,
+        "cpu":       psutil.cpu_percent() / 100,
+        "mem":       psutil.virtual_memory().percent / 100,
+        "disk_free": disk.free / disk.total,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Job execution
+# ---------------------------------------------------------------------------
+
 def run_docker(image: str, command: str, container_name: str = "") -> subprocess.Popen:
-    """Start a docker container and return the Popen handle. Caller must wait()."""
+    """
+    Start a Docker container and return the Popen handle immediately.
+    The container name is set deterministically so kill_job can always
+    stop it by name, without needing to read a cidfile.
+    The caller is responsible for calling communicate() to wait for exit.
+    """
     cmd = ["docker", "run", "--rm", "--network", "none"]
     if container_name:
         cmd += ["--name", container_name]
@@ -95,31 +143,36 @@ def run_docker(image: str, command: str, container_name: str = "") -> subprocess
     if command:
         cmd += shlex.split(command)
 
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     proc._container_name = container_name
     return proc
 
 
-def execute(job: dict) -> tuple[str, str]:
+def execute(job: dict) -> tuple:
+    """
+    Execute a job and return (status, output).
+
+    Docker jobs: run in an isolated container with no network access.
+    Shell jobs:  run directly in a subprocess on the host.
+
+    In both cases the process handle is stored in _processes before
+    blocking on output, so kill_job can reach it while the job is running.
+    """
     job_id = job["job"]
     try:
         if job.get("image"):
-            # Use a deterministic container name so kill_job can always find it
             container_name = f"tcp-{job_id[:16]}"
             proc = run_docker(job["image"], job["command"], container_name=container_name)
 
+            # Register before waiting so kill_job can find the container.
             with _processes_lock:
                 _processes[job_id] = ("docker", container_name)
 
             out, _ = proc.communicate()
-
             if proc.returncode != 0:
                 return STATUS_FAILED, out.decode()
             return STATUS_SUCCEEDED, out.decode()
+
         else:
             proc = subprocess.Popen(
                 job["command"],
@@ -134,27 +187,55 @@ def execute(job: dict) -> tuple[str, str]:
             if proc.returncode != 0:
                 return STATUS_FAILED, out.decode()
             return STATUS_SUCCEEDED, out.decode()
+
     except Exception as e:
         return STATUS_FAILED, str(e)
 
 
-def send_logs(job_id: str, output: str):
-    for line in output.splitlines():
-        try:
-            httpx.post(
-                f"{CONTROLLER}/agent/log",
-                json={"job": job_id, "line": line, "node": node},
-                headers=_headers(),
-                timeout=1,
-            )
-        except Exception:
-            pass
+def kill_job(job_id: str):
+    """
+    Terminate a running job.
+    Shell jobs receive SIGTERM, then SIGKILL after 5 seconds if still alive.
+    Docker jobs are stopped with 'docker stop', which sends SIGTERM and waits
+    for the container to exit before force-killing it.
+    """
+    with _processes_lock:
+        entry = _processes.pop(job_id, None)
 
+    if entry is None:
+        return
+
+    kind, handle = entry
+
+    if kind == "shell":
+        try:
+            handle.terminate()
+            try:
+                handle.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                handle.kill()
+        except Exception as e:
+            print(f"[{node}] failed to kill shell job {job_id}: {e}")
+
+    elif kind == "docker":
+        if handle:
+            try:
+                subprocess.run(["docker", "stop", handle], timeout=10)
+            except Exception as e:
+                print(f"[{node}] failed to stop container {handle}: {e}")
+
+    print(f"[{node}] cancelled job {job_id}")
+
+
+# ---------------------------------------------------------------------------
+# Background job thread
+# ---------------------------------------------------------------------------
 
 def run_job_thread(job: dict):
     """
-    Runs in a background thread. Executes the job, sends logs, then puts
-    the result on the queue for the main loop to post back to the controller.
+    Runs in a background thread per job.
+    Executes the job, ships its output as logs, then queues the result
+    for the main loop to post back to the controller.
     """
     job_id = job["job"]
 
@@ -172,8 +253,26 @@ def run_job_thread(job: dict):
             _processes.pop(job_id, None)
 
 
+# ---------------------------------------------------------------------------
+# Controller communication
+# ---------------------------------------------------------------------------
+
+def send_logs(job_id: str, output: str):
+    """Post each line of output to the controller's log endpoint."""
+    for line in output.splitlines():
+        try:
+            httpx.post(
+                f"{CONTROLLER}/agent/log",
+                json={"job": job_id, "line": line, "node": node},
+                headers=_headers(),
+                timeout=1,
+            )
+        except Exception:
+            pass
+
+
 def send_heartbeats():
-    """Send a heartbeat for every job currently running."""
+    """Send a heartbeat to the controller for every currently running job."""
     with _running_lock:
         job_ids = list(_running_jobs)
 
@@ -189,58 +288,36 @@ def send_heartbeats():
             pass
 
 
-def kill_job(job_id: str):
-    """Terminate a running job by job_id. SIGTERM first, SIGKILL if still alive."""
-    with _processes_lock:
-        entry = _processes.pop(job_id, None)
-
-    if entry is None:
-        return
-
-    kind, handle = entry
-
-    if kind == "shell":
-        proc = handle
-        try:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        except Exception as e:
-            print(f"[{node}] failed to kill shell job {job_id}: {e}")
-
-    elif kind == "docker":
-        container_id = handle
-        if container_id:
-            try:
-                subprocess.run(["docker", "stop", container_id], timeout=10)
-            except Exception as e:
-                print(f"[{node}] failed to stop container {container_id}: {e}")
-
-    print(f"[{node}] cancelled job {job_id}")
-
+# ---------------------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------------------
 
 def loop():
+    """
+    Poll the controller in a tight loop (1 second sleep):
+
+    1. Post node state. Exit on 401 (revocation).
+    2. Send heartbeats for running jobs on the configured interval.
+    3. Check for cancellation requests and kill matching jobs.
+    4. Drain the result queue and post completed job results.
+    5. Pick up one new pending job and start it in a background thread.
+    """
     last_heartbeat = 0.0
 
     while True:
         try:
-            r = httpx.post(
-                f"{CONTROLLER}/state",
-                json=state(),
-                headers=_headers(),
-            )
+            # 1. Report state
+            r = httpx.post(f"{CONTROLLER}/state", json=collect_state(), headers=_headers())
             if r.status_code == 401:
                 _handle_revocation()
 
-            # Send heartbeats on interval
+            # 2. Heartbeats
             now = time.time()
             if now - last_heartbeat >= HEARTBEAT_INTERVAL:
                 send_heartbeats()
                 last_heartbeat = now
 
-            # Check for cancellation requests
+            # 3. Cancellations
             try:
                 r = httpx.get(
                     f"{CONTROLLER}/agent/cancel/{node}",
@@ -253,7 +330,7 @@ def loop():
             except Exception:
                 pass
 
-            # Drain completed jobs and post results
+            # 4. Results
             while not _results.empty():
                 job_id, status, result = _results.get_nowait()
                 print(f"[{node}] job {job_id}: {status}")
@@ -266,21 +343,16 @@ def loop():
                 except Exception as e:
                     print(f"[{node}] failed to post result for {job_id}: {e}")
 
-            # Pick up a new pending job (one per poll cycle is fine)
-            r = httpx.get(
-                f"{CONTROLLER}/agent/jobs/{node}",
-                headers=_headers(),
-            )
+            # 5. Pick up new job
+            r = httpx.get(f"{CONTROLLER}/agent/jobs/{node}", headers=_headers())
             if r.status_code == 401:
                 _handle_revocation()
 
             data = r.json()
-
             if "job" in data:
-                job_id = data["job"]
-                image = data.get("image")
+                job_id  = data["job"]
+                image   = data.get("image")
                 command = data.get("command")
-
                 if image:
                     print(f"[{node}] starting job {job_id}: docker run {image} {command}")
                 else:

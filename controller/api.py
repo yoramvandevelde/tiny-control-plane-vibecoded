@@ -1,69 +1,78 @@
-import os
-from fastapi import FastAPI, Header, HTTPException
 import asyncio
+import os
 import random
 import time
 from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Header, HTTPException
+
 from controller.store import (
-    init_db,
-    register_node,
-    verify_node_token,
-    revoke_node,
-    update_state,
-    list_nodes,
-    create_job,
-    list_jobs,
-    get_pending_job,
-    start_job,
-    finish_job,
-    mark_lost,
-    renew_lease,
-    expire_lost_jobs,
-    enqueue_cancel,
-    pop_cancel_jobs,
-    create_workload,
-    list_workloads,
-    count_active_workload_jobs,
-    count_active_node_jobs,
-    get_excess_workload_jobs,
-    update_workload_replicas,
-    delete_workload,
-    store_log,
-    get_logs,
     JobStatus,
+    count_active_node_jobs,
+    count_active_workload_jobs,
+    create_job,
+    create_workload,
+    delete_workload,
+    enqueue_cancel,
+    expire_lost_jobs,
+    finish_job,
+    get_excess_workload_jobs,
+    get_logs,
+    get_pending_job,
+    init_db,
+    list_jobs,
+    list_nodes,
+    list_workloads,
+    mark_lost,
+    pop_cancel_jobs,
+    register_node,
+    renew_lease,
+    revoke_node,
+    start_job,
+    store_log,
+    update_state,
+    update_workload_replicas,
+    verify_node_token,
 )
 
+# A node is considered stale if it has not reported state within this window.
 NODE_STALE_SECONDS = 30
 
 
+# ---------------------------------------------------------------------------
+# Auth helpers
+# ---------------------------------------------------------------------------
+
 def get_bootstrap_token() -> str:
+    """Read the bootstrap token from the environment. Raises if not set."""
     token = os.environ.get("TCP_BOOTSTRAP_TOKEN", "")
     if not token:
         raise RuntimeError("TCP_BOOTSTRAP_TOKEN environment variable is not set")
     return token
 
 
-def cancel_job(job_id: str, node_id: str):
-    """Mark a job lost and enqueue a cancellation signal for the agent."""
-    mark_lost(job_id)
-    enqueue_cancel(job_id, node_id)
-
-
 def require_agent_auth(node_id: str, x_node_token: str | None):
-    """Raise 401 if the node token is missing or invalid."""
+    """Raise HTTP 401 if the per-node token is missing or invalid."""
     if not x_node_token or not verify_node_token(node_id, x_node_token):
         raise HTTPException(status_code=401, detail="invalid or missing node token")
 
 
+# ---------------------------------------------------------------------------
+# Scheduler
+# ---------------------------------------------------------------------------
+
 def pick_node(nodes: dict, constraints: dict, resources: dict) -> str | None:
     """
-    Select a node using:
-    1. Only healthy, recently-seen nodes
-    2. Label constraint matching
-    3. Least active jobs (primary) + lowest CPU (secondary)
-    4. Random shuffle before sorting so equal scores are broken randomly
+    Select the best node for a new job using a scored candidate list:
+
+    1. Exclude unhealthy nodes and nodes not seen within NODE_STALE_SECONDS.
+    2. Exclude nodes whose labels do not satisfy the workload constraints.
+    3. Score by (active job count, CPU usage) — lowest score wins.
+    4. Shuffle before sorting so ties are broken randomly.
+
+    Returns None if no eligible node is available.
     """
-    now = time.time()
+    now        = time.time()
     candidates = []
 
     for node_id, info in nodes.items():
@@ -78,7 +87,7 @@ def pick_node(nodes: dict, constraints: dict, resources: dict) -> str | None:
             continue
 
         job_count = count_active_node_jobs(node_id)
-        cpu_used = info.get("state", {}).get("cpu", 0)
+        cpu_used  = info.get("state", {}).get("cpu", 0)
         candidates.append((job_count, cpu_used, node_id))
 
     if not candidates:
@@ -89,13 +98,28 @@ def pick_node(nodes: dict, constraints: dict, resources: dict) -> str | None:
     return candidates[0][2]
 
 
+# ---------------------------------------------------------------------------
+# Reconciler
+# ---------------------------------------------------------------------------
+
+def cancel_job(job_id: str, node_id: str):
+    """Mark a job as LOST and enqueue a cancellation signal for its agent."""
+    mark_lost(job_id)
+    enqueue_cancel(job_id, node_id)
+
+
 def reconcile_once():
-    # Expire leases before counting active jobs so lost jobs don't block
-    # workload replica targets
+    """
+    Single reconciliation pass:
+
+    1. Expire leases so lost jobs do not count toward replica targets.
+    2. For each workload, schedule new jobs on available nodes until the
+       active job count matches the desired replica count.
+    """
     expire_lost_jobs()
 
     workloads = list_workloads()
-    nodes = list_nodes()
+    nodes     = list_nodes()
 
     for w in workloads:
         running = count_active_workload_jobs(w["name"])
@@ -114,14 +138,18 @@ def reconcile_once():
 
 
 async def reconcile_loop():
+    """Run reconcile_once every 5 seconds in the background."""
     while True:
         try:
             reconcile_once()
         except Exception as e:
             print(f"[reconcile] error: {e}")
-
         await asyncio.sleep(5)
 
+
+# ---------------------------------------------------------------------------
+# Application lifecycle
+# ---------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app):
@@ -133,8 +161,17 @@ async def lifespan(app):
 app = FastAPI(lifespan=lifespan)
 
 
+# ---------------------------------------------------------------------------
+# Agent endpoints
+# These are called by agents, not by operators. All require a per-node token.
+# ---------------------------------------------------------------------------
+
 @app.post("/register")
 def register(data: dict, x_bootstrap_token: str | None = Header(None)):
+    """
+    Register a new node. Requires the shared bootstrap token.
+    Returns a per-node token that the agent must use for all subsequent calls.
+    """
     if x_bootstrap_token != get_bootstrap_token():
         raise HTTPException(status_code=401, detail="invalid bootstrap token")
     token = register_node(
@@ -148,43 +185,30 @@ def register(data: dict, x_bootstrap_token: str | None = Header(None)):
 
 @app.post("/state")
 def state(data: dict, x_node_token: str | None = Header(None)):
+    """Receive a state report (CPU, memory, etc.) from an agent."""
     require_agent_auth(data["node"], x_node_token)
     update_state(data["node"], data)
     return {"ok": True}
 
 
-@app.get("/nodes")
-def nodes():
-    return list_nodes()
-
-
-@app.post("/jobs")
-def job(data: dict):
-    jid = create_job(data["node"], data["command"], image=data.get("image"))
-    return {"job": jid}
-
-
-@app.get("/jobs")
-def jobs():
-    return list_jobs()
-
-
 @app.get("/agent/jobs/{node}")
 def agent_job(node: str, x_node_token: str | None = Header(None)):
+    """
+    Return the next pending job for a node and mark it as RUNNING.
+    Returns an empty object if there is nothing to do.
+    """
     require_agent_auth(node, x_node_token)
     job = get_pending_job(node)
-
     if not job:
         return {}
-
     jid, cmd, image = job
     start_job(jid)
-
     return {"job": jid, "command": cmd, "image": image}
 
 
 @app.post("/agent/heartbeat/{job_id}")
 def agent_heartbeat(job_id: str, data: dict, x_node_token: str | None = Header(None)):
+    """Renew the lease of a running job to prevent it from being marked lost."""
     require_agent_auth(data["node"], x_node_token)
     renew_lease(job_id)
     return {"ok": True}
@@ -192,6 +216,7 @@ def agent_heartbeat(job_id: str, data: dict, x_node_token: str | None = Header(N
 
 @app.post("/agent/result")
 def agent_result(data: dict, x_node_token: str | None = Header(None)):
+    """Receive the final status and output of a completed job."""
     require_agent_auth(data["node"], x_node_token)
     finish_job(data["job"], data["status"], data["result"])
     return {"ok": True}
@@ -199,6 +224,7 @@ def agent_result(data: dict, x_node_token: str | None = Header(None)):
 
 @app.post("/agent/log")
 def agent_log(data: dict, x_node_token: str | None = Header(None)):
+    """Receive a single log line from an agent for a running or completed job."""
     require_agent_auth(data["node"], x_node_token)
     store_log(data["job"], data["line"])
     return {"ok": True}
@@ -206,18 +232,57 @@ def agent_log(data: dict, x_node_token: str | None = Header(None)):
 
 @app.get("/agent/cancel/{node}")
 def agent_cancel(node: str, x_node_token: str | None = Header(None)):
+    """
+    Return and clear all pending cancellations for a node.
+    The agent calls this on every poll cycle and kills the listed jobs.
+    """
     require_agent_auth(node, x_node_token)
     return {"cancel": pop_cancel_jobs(node)}
 
 
+# ---------------------------------------------------------------------------
+# Operator endpoints
+# These are called by the CLI. No authentication beyond network access.
+# ---------------------------------------------------------------------------
+
+@app.get("/nodes")
+def nodes():
+    """Return all registered nodes and their current state."""
+    return list_nodes()
+
+
 @app.delete("/nodes/{node_id}")
 def revoke(node_id: str):
+    """
+    Revoke a node's token. The node will be rejected on its next poll and
+    will shut down. The node record and its job history are preserved.
+    """
     revoke_node(node_id)
     return {"ok": True}
 
 
+@app.post("/jobs")
+def job(data: dict):
+    """Submit a one-shot job directly to a specific node."""
+    jid = create_job(data["node"], data["command"], image=data.get("image"))
+    return {"job": jid}
+
+
+@app.get("/jobs")
+def jobs():
+    """Return all jobs."""
+    return list_jobs()
+
+
+@app.get("/jobs/{job_id}/logs")
+def job_logs(job_id: str):
+    """Return all log lines for a job."""
+    return get_logs(job_id)
+
+
 @app.post("/workloads")
 def workload(data: dict):
+    """Create or replace a workload. The reconciler will schedule jobs to meet the replica count."""
     create_workload(
         data["name"],
         data["command"],
@@ -231,13 +296,18 @@ def workload(data: dict):
 
 @app.get("/workloads")
 def workloads():
+    """Return all workload definitions."""
     return list_workloads()
 
 
 @app.post("/workloads/{name}/scale")
 def scale_workload(name: str, data: dict):
+    """
+    Adjust the replica count of a running workload.
+    Excess jobs are cancelled immediately; new jobs are scheduled by the reconciler.
+    """
     replicas = data["replicas"]
-    updated = update_workload_replicas(name, replicas)
+    updated  = update_workload_replicas(name, replicas)
     if not updated:
         raise HTTPException(status_code=404, detail="workload not found")
 
@@ -250,16 +320,14 @@ def scale_workload(name: str, data: dict):
 
 @app.delete("/workloads/{name}")
 def remove_workload(name: str):
-    # Zero replicas first so the reconciler cannot schedule new jobs
-    # if it runs between the cancel and delete steps.
+    """
+    Remove a workload and cancel all its active jobs.
+    Replicas are zeroed first so the reconciler cannot schedule new jobs
+    in the window between cancellation and deletion.
+    """
     update_workload_replicas(name, 0)
     excess = get_excess_workload_jobs(name, 0)
     for job_id, node_id in excess:
         cancel_job(job_id, node_id)
     delete_workload(name)
     return {"ok": True, "cancelled": len(excess)}
-
-
-@app.get("/jobs/{job_id}/logs")
-def job_logs(job_id: str):
-    return get_logs(job_id)
