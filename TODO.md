@@ -2,11 +2,11 @@
 
 ## Bug Fixes
 
-- [ ] **`CANCELLED` is not a real status** — `mark_cancelled` sets status to `LOST` and `JobStatus` has no `CANCELLED` constant, despite the README and events treating it as distinct. The database, status table, and CLI colouring all need updating. Also do a full audit of every place `LOST` is used to check whether it should actually be `CANCELLED` — the reconciler treating a cancelled job the same as a lost one and scheduling a replacement is a subtle but real bug.
+- [X] **`CANCELLED` is not a real status** — `mark_cancelled` sets status to `LOST` and `JobStatus` has no `CANCELLED` constant, despite the README and events treating it as distinct. The database, status table, and CLI colouring all need updating. Also do a full audit of every place `LOST` is used to check whether it should actually be `CANCELLED` — the reconciler treating a cancelled job the same as a lost one and scheduling a replacement is a subtle but real bug.
 
-- [ ] **`cancelled` status missing from `STATUS_COLOUR` in the CLI** — falls through to white instead of yellow. Minor but inconsistent with `EVENT_COLOUR`.
+- [X] **`cancelled` status missing from `STATUS_COLOUR` in the CLI** — falls through to white instead of yellow. Minor but inconsistent with `EVENT_COLOUR`.
 
-- [ ] **Log streaming does not close on `cancelled` status** — `job_logs_stream` only terminates on `succeeded`, `failed`, or `lost`. A cancelled job's stream hangs open indefinitely.
+- [X] **Log streaming does not close on `cancelled` status** — `job_logs_stream` only terminates on `succeeded`, `failed`, or `lost`. A cancelled job's stream hangs open indefinitely.
 
 ## Reliability
 
