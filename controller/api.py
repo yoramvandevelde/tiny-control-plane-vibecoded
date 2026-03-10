@@ -65,10 +65,24 @@ def get_bootstrap_token() -> str:
     return token
 
 
+def get_operator_token() -> str:
+    """Read the operator token from the environment. Raises if not set."""
+    token = os.environ.get("TCP_OPERATOR_TOKEN", "")
+    if not token:
+        raise RuntimeError("TCP_OPERATOR_TOKEN environment variable is not set")
+    return token
+
+
 def require_agent_auth(node_id: str, x_node_token: str | None):
     """Raise HTTP 401 if the per-node token is missing or invalid."""
     if not x_node_token or not verify_node_token(node_id, x_node_token):
         raise HTTPException(status_code=401, detail="invalid or missing node token")
+
+
+def require_operator_auth(x_operator_token: str | None):
+    """Raise HTTP 401 if the operator token is missing or does not match."""
+    if not x_operator_token or x_operator_token != get_operator_token():
+        raise HTTPException(status_code=401, detail="invalid or missing operator token")
 
 
 # ---------------------------------------------------------------------------
@@ -261,52 +275,62 @@ def agent_cancel(node: str, x_node_token: str | None = Header(None)):
 
 # ---------------------------------------------------------------------------
 # Operator endpoints
-# These are called by the CLI. No authentication beyond network access.
+# These are called by the CLI. All require the shared operator token via
+# the X-Operator-Token header. Set TCP_OPERATOR_TOKEN on the controller,
+# and provide the same value to the CLI via TCP_OPERATOR_TOKEN or
+# ~/.tcp/operator.token.
 # ---------------------------------------------------------------------------
 
 @app.get("/nodes")
-def nodes():
+def nodes(x_operator_token: str | None = Header(None)):
     """Return all registered nodes and their current state."""
+    require_operator_auth(x_operator_token)
     return list_nodes()
 
 
 @app.delete("/nodes/{node_id}")
-def revoke(node_id: str):
+def revoke(node_id: str, x_operator_token: str | None = Header(None)):
     """
     Revoke a node's token. The node will be rejected on its next poll and
     will shut down. The node record and its job history are preserved.
     """
+    require_operator_auth(x_operator_token)
     revoke_node(node_id)
     return {"ok": True}
 
 
 @app.post("/jobs")
-def job(data: dict):
+def job(data: dict, x_operator_token: str | None = Header(None)):
     """Submit a one-shot job directly to a specific node."""
+    require_operator_auth(x_operator_token)
     jid = create_job(data["node"], data["command"], image=data.get("image"))
     return {"job": jid}
 
 
 @app.get("/jobs")
-def jobs():
+def jobs(x_operator_token: str | None = Header(None)):
     """Return all jobs."""
+    require_operator_auth(x_operator_token)
     return list_jobs()
 
 
 @app.get("/jobs/{job_id}/logs")
-def job_logs(job_id: str):
+def job_logs(job_id: str, x_operator_token: str | None = Header(None)):
     """Return all log lines for a job."""
+    require_operator_auth(x_operator_token)
     return get_logs(job_id)
 
 
 @app.get("/jobs/{job_id}/logs/stream")
-async def job_logs_stream(job_id: str):
+async def job_logs_stream(job_id: str, x_operator_token: str | None = Header(None)):
     """
     Stream log lines for a job using Server-Sent Events.
     Replays all existing lines first, then tails new ones as they arrive.
     The stream closes automatically when the job reaches any terminal state:
     succeeded, failed, lost, or cancelled.
     """
+    require_operator_auth(x_operator_token)
+
     async def generator():
         cursor = 0
         while True:
@@ -327,8 +351,9 @@ async def job_logs_stream(job_id: str):
 
 
 @app.post("/workloads")
-def workload(data: dict):
+def workload(data: dict, x_operator_token: str | None = Header(None)):
     """Create or replace a workload. The reconciler will schedule jobs to meet the replica count."""
+    require_operator_auth(x_operator_token)
     create_workload(
         data["name"],
         data["command"],
@@ -341,17 +366,19 @@ def workload(data: dict):
 
 
 @app.get("/workloads")
-def workloads():
+def workloads(x_operator_token: str | None = Header(None)):
     """Return all workload definitions."""
+    require_operator_auth(x_operator_token)
     return list_workloads()
 
 
 @app.post("/workloads/{name}/scale")
-def scale_workload(name: str, data: dict):
+def scale_workload(name: str, data: dict, x_operator_token: str | None = Header(None)):
     """
     Adjust the replica count of a running workload.
     Excess jobs are cancelled immediately; new jobs are scheduled by the reconciler.
     """
+    require_operator_auth(x_operator_token)
     replicas = data["replicas"]
     updated  = update_workload_replicas(name, replicas)
     if not updated:
@@ -365,12 +392,13 @@ def scale_workload(name: str, data: dict):
 
 
 @app.delete("/workloads/{name}")
-def remove_workload(name: str):
+def remove_workload(name: str, x_operator_token: str | None = Header(None)):
     """
     Remove a workload and cancel all its active jobs.
     Replicas are zeroed first so the reconciler cannot schedule new jobs
     in the window between cancellation and deletion.
     """
+    require_operator_auth(x_operator_token)
     update_workload_replicas(name, 0, silent=True)
     excess = get_excess_workload_jobs(name, 0)
     node_count = len({node_id for _, node_id in excess})
@@ -382,17 +410,20 @@ def remove_workload(name: str):
 
 
 @app.get("/events")
-def events():
+def events(x_operator_token: str | None = Header(None)):
     """Return the most recent cluster events in chronological order."""
+    require_operator_auth(x_operator_token)
     return list_events()
 
 
 @app.get("/events/stream")
-async def events_stream():
+async def events_stream(x_operator_token: str | None = Header(None)):
     """
     Stream cluster events using Server-Sent Events.
     Replays recent history first, then tails new events as they occur.
     """
+    require_operator_auth(x_operator_token)
+
     async def generator():
         existing = list_events()
         cursor   = 0

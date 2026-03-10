@@ -1,3 +1,6 @@
+import os
+import pathlib
+import sys
 import time
 from typing import Optional
 
@@ -23,6 +26,59 @@ STATUS_COLOUR = {
     "cancelled": "yellow",
     "lost":      "magenta",
 }
+
+
+# ---------------------------------------------------------------------------
+# Operator token
+#
+# The CLI authenticates to the controller using a shared operator token.
+# Resolution order:
+#   1. ~/.tcp/operator.token  — written manually or by a future login command
+#   2. TCP_OPERATOR_TOKEN     — environment variable fallback
+#
+# If neither is present the CLI exits immediately with a clear message.
+# To rotate the token, update the file or env var — no CLI command needed.
+# ---------------------------------------------------------------------------
+
+def _operator_token_path() -> pathlib.Path:
+    """Return the path to the persisted operator token file."""
+    d = pathlib.Path.home() / ".tcp"
+    d.mkdir(mode=0o700, exist_ok=True)
+    return d / "operator.token"
+
+
+def _load_operator_token() -> str:
+    """
+    Load the operator token used to authenticate CLI requests to the controller.
+
+    Checks ~/.tcp/operator.token first, then falls back to the TCP_OPERATOR_TOKEN
+    environment variable. Exits with a clear error message if neither is present,
+    mirroring how the agent handles a missing bootstrap token.
+    """
+    # Try the token file first.
+    p = _operator_token_path()
+    try:
+        token = p.read_text().strip()
+        if token:
+            return token
+    except FileNotFoundError:
+        pass
+
+    # Fall back to the environment variable.
+    token = os.environ.get("TCP_OPERATOR_TOKEN", "").strip()
+    if token:
+        return token
+
+    console.print(
+        "[red]error:[/red] no operator token found.\n"
+        "Set TCP_OPERATOR_TOKEN or write the token to ~/.tcp/operator.token"
+    )
+    sys.exit(1)
+
+
+def _operator_headers() -> dict:
+    """Return the auth header dict required by all operator endpoints."""
+    return {"X-Operator-Token": _load_operator_token()}
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +135,7 @@ def _build_status_table(job_list: list, now: float) -> Table:
 @app.command()
 def nodes():
     """List all registered nodes and their current health state."""
-    r = httpx.get(f"{API}/nodes")
+    r = httpx.get(f"{API}/nodes", headers=_operator_headers())
     console.print(r.json())
 
 
@@ -94,7 +150,7 @@ def revoke(
     The node record and its job history are preserved. Restart the agent
     to re-register the node with a fresh token.
     """
-    r = httpx.delete(f"{API}/nodes/{node_id}")
+    r = httpx.delete(f"{API}/nodes/{node_id}", headers=_operator_headers())
     console.print(r.json())
 
 
@@ -153,17 +209,19 @@ def topology(
     Only PENDING and RUNNING jobs are shown. Completed jobs are omitted.
     Use --follow / -f to keep the view live, refreshing every second.
     """
+    headers = _operator_headers()
     if follow:
         with Live(console=console, refresh_per_second=1, screen=False) as live:
             while True:
-                nodes_data = httpx.get(f"{API}/nodes").json()
-                job_list   = httpx.get(f"{API}/jobs").json()
+                nodes_data = httpx.get(f"{API}/nodes", headers=headers).json()
+                job_list   = httpx.get(f"{API}/jobs",  headers=headers).json()
                 live.update(_build_topology(nodes_data, job_list))
                 time.sleep(1)
     else:
-        nodes_data = httpx.get(f"{API}/nodes").json()
-        job_list   = httpx.get(f"{API}/jobs").json()
+        nodes_data = httpx.get(f"{API}/nodes", headers=headers).json()
+        job_list   = httpx.get(f"{API}/jobs",  headers=headers).json()
         console.print(_build_topology(nodes_data, job_list))
+
 
 # ---------------------------------------------------------------------------
 # Job commands
@@ -176,7 +234,7 @@ def exec_cmd(
     image:   Optional[str]  = typer.Option(None, help="Docker image to run the command in. Omit for a shell job."),
 ):
     """Submit a one-shot job to a specific node."""
-    r = httpx.post(f"{API}/jobs", json={"node": node, "command": command, "image": image})
+    r = httpx.post(f"{API}/jobs", json={"node": node, "command": command, "image": image}, headers=_operator_headers())
     console.print(r.json())
 
 
@@ -189,15 +247,16 @@ def status(
 
     Use --follow / -f to keep the table live, refreshing every second.
     """
+    headers = _operator_headers()
     if follow:
         with Live(console=console, refresh_per_second=1, screen=False) as live:
             while True:
-                r        = httpx.get(f"{API}/jobs")
+                r        = httpx.get(f"{API}/jobs", headers=headers)
                 now      = time.time()
                 live.update(_build_status_table(r.json(), now))
                 time.sleep(1)
     else:
-        r   = httpx.get(f"{API}/jobs")
+        r   = httpx.get(f"{API}/jobs", headers=headers)
         now = time.time()
         console.print(_build_status_table(r.json(), now))
 
@@ -205,7 +264,7 @@ def status(
 @app.command()
 def jobs():
     """List all jobs as raw JSON."""
-    r = httpx.get(f"{API}/jobs")
+    r = httpx.get(f"{API}/jobs", headers=_operator_headers())
     console.print(r.json())
 
 
@@ -220,14 +279,15 @@ def logs(
     Use --follow / -f to tail the log in real time. The stream closes
     automatically when the job finishes.
     """
+    headers = _operator_headers()
     if follow:
         # Connect to the SSE stream and print lines as they arrive.
-        with httpx.stream("GET", f"{API}/jobs/{job}/logs/stream", timeout=None) as r:
+        with httpx.stream("GET", f"{API}/jobs/{job}/logs/stream", headers=headers, timeout=None) as r:
             for line in r.iter_lines():
                 if line.startswith("data: "):
                     console.print(line[6:])
     else:
-        r = httpx.get(f"{API}/jobs/{job}/logs")
+        r = httpx.get(f"{API}/jobs/{job}/logs", headers=headers)
         for entry in r.json():
             console.print(entry["line"])
 
@@ -264,6 +324,7 @@ def deploy(
             "image":       image,
             "constraints": constraints or None,
         },
+        headers=_operator_headers(),
     )
     console.print(r.json())
 
@@ -279,7 +340,7 @@ def scale(
     Scaling down cancels excess jobs immediately.
     Scaling up schedules new jobs on the next reconciler pass.
     """
-    r = httpx.post(f"{API}/workloads/{name}/scale", json={"replicas": replicas})
+    r = httpx.post(f"{API}/workloads/{name}/scale", json={"replicas": replicas}, headers=_operator_headers())
     console.print(r.json())
 
 
@@ -293,9 +354,8 @@ def undeploy(
     The workload definition is deleted immediately. Running containers
     will receive a stop signal within one agent poll cycle.
     """
-    r = httpx.delete(f"{API}/workloads/{name}")
+    r = httpx.delete(f"{API}/workloads/{name}", headers=_operator_headers())
     console.print(r.json())
-
 
 
 @app.command()
@@ -328,8 +388,9 @@ def events(
         time_str  = datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S") if ts else "        "
         return f"[dim]{time_str}[/dim]  [{colour}]{kind:<20}[/{colour}]  {message}"
 
+    headers = _operator_headers()
     if follow:
-        with httpx.stream("GET", f"{API}/events/stream", timeout=None) as r:
+        with httpx.stream("GET", f"{API}/events/stream", headers=headers, timeout=None) as r:
             for line in r.iter_lines():
                 if line.startswith("data: "):
                     raw    = line[6:]
@@ -346,7 +407,7 @@ def events(
                         message = parts[1] if len(parts) > 1 else ""
                         console.print(_fmt_event(kind.strip(), message))
     else:
-        r = httpx.get(f"{API}/events")
+        r = httpx.get(f"{API}/events", headers=headers)
         for entry in r.json():
             console.print(_fmt_event(entry["kind"], entry["message"], entry.get("ts")))
 

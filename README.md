@@ -28,6 +28,7 @@ Somehow, this still resulted in:
 * a CLI that tells you what is actually happening
 * scaling workloads up and down
 * per-node authentication and revocation
+* per-operator authentication
 * streaming logs via SSE
 * cluster event log with lifecycle instrumentation
 * topology view
@@ -52,13 +53,20 @@ Agents poll the controller for work. The controller maintains desired state via 
 
 ### Authentication
 
-The controller uses a two-token system.
+The controller uses a three-token system.
 
 **Bootstrap token** — a shared secret set via `TCP_BOOTSTRAP_TOKEN` on both the controller and each agent. Used only for the initial registration request. If it is wrong or missing, the agent exits immediately.
 
-**Node token** — a UUID issued by the controller on successful registration. The agent sends it as `X-Node-Token` on every subsequent request. Each node has its own token, so individual nodes can be revoked without affecting others.
+**Node token** — a UUID issued by the controller on successful registration. The agent sends it as `X-Node-Token` on every subsequent request. Each node has its own token, so individual nodes can be revoked without affecting others. Re-registering issues a new node token and immediately invalidates the old one.
 
-Re-registering issues a new token and immediately invalidates the old one.
+**Operator token** — a shared secret set via `TCP_OPERATOR_TOKEN` on the controller. The CLI sends it as `X-Operator-Token` on every request. All operator-facing endpoints (`/nodes`, `/jobs`, `/workloads`, `/events`, and their sub-routes) require this token. Requests without it or with the wrong value are rejected with HTTP 401.
+
+The CLI resolves the operator token in this order:
+
+1. `~/.tcp/operator.token` — write the token here manually for persistent access
+2. `TCP_OPERATOR_TOKEN` environment variable — useful for scripting or CI
+
+If neither is present the CLI exits immediately with a clear error message. To rotate the token, update the value on the controller and update the file or env var on the operator side — no command is needed.
 
 ---
 
@@ -262,6 +270,24 @@ Set the bootstrap token on both the controller host and each agent host:
 
 ```bash
 export TCP_BOOTSTRAP_TOKEN=your-secret-here
+```
+
+Set the operator token on the controller host:
+
+```bash
+export TCP_OPERATOR_TOKEN=your-operator-secret-here
+```
+
+Provide the operator token to the CLI — either via the environment variable:
+
+```bash
+export TCP_OPERATOR_TOKEN=your-operator-secret-here
+```
+
+Or by writing it to the token file (takes precedence over the env var):
+
+```bash
+mkdir -p ~/.tcp && echo "your-operator-secret-here" > ~/.tcp/operator.token && chmod 600 ~/.tcp/operator.token
 ```
 
 Start the controller:

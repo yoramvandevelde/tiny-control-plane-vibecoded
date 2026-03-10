@@ -17,13 +17,15 @@ import controller.api as api
 
 
 BOOTSTRAP = "test-bootstrap-token"
+OPERATOR  = "test-operator-token"
 
 
 @pytest.fixture(autouse=True)
 def isolated_db(tmp_path, monkeypatch):
-    """Point the store at a fresh per-test database and set the bootstrap token."""
+    """Point the store at a fresh per-test database and set the bootstrap and operator tokens."""
     db_path = str(tmp_path / "cluster.db")
     monkeypatch.setenv("TCP_BOOTSTRAP_TOKEN", BOOTSTRAP)
+    monkeypatch.setenv("TCP_OPERATOR_TOKEN", OPERATOR)
     # Re-initialise with a clean DB for every test
     store.DB_PATH = db_path
     store._local.conn = None
@@ -50,6 +52,14 @@ def registered(client):
     )
     assert r.status_code == 200
     return r.json()["token"]
+
+
+def _op(extra: dict = None) -> dict:
+    """Return operator auth headers, optionally merged with extra headers."""
+    h = {"X-Operator-Token": OPERATOR}
+    if extra:
+        h.update(extra)
+    return h
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +107,7 @@ def test_register_with_labels(client):
         headers={"X-Bootstrap-Token": BOOTSTRAP},
     )
     assert r.status_code == 200
-    nodes = client.get("/nodes").json()
+    nodes = client.get("/nodes", headers=_op()).json()
     assert nodes["node1"]["labels"]["region"] == "homelab"
 
 
@@ -299,28 +309,43 @@ def test_agent_cancel_rejected_with_wrong_token(client):
 # ---------------------------------------------------------------------------
 
 def test_get_nodes_returns_registered_node(client, registered):
-    r = client.get("/nodes")
+    r = client.get("/nodes", headers=_op())
     assert r.status_code == 200
     assert "node1" in r.json()
 
 
 def test_get_nodes_empty_when_none_registered(client):
-    r = client.get("/nodes")
+    r = client.get("/nodes", headers=_op())
     assert r.status_code == 200
     assert r.json() == {}
 
 
+def test_get_nodes_rejected_without_operator_token(client):
+    r = client.get("/nodes")
+    assert r.status_code == 401
+
+
+def test_get_nodes_rejected_with_wrong_operator_token(client):
+    r = client.get("/nodes", headers={"X-Operator-Token": "wrong"})
+    assert r.status_code == 401
+
+
 def test_revoke_node(client, registered):
-    r = client.delete("/nodes/node1")
+    r = client.delete("/nodes/node1", headers=_op())
     assert r.status_code == 200
     assert r.json()["ok"] is True
 
-    # Token should now be rejected
+    # Node token should now be rejected
     r = client.post(
         "/state",
         json={"node": "node1", "cpu": 0.1, "mem": 0.1},
         headers={"X-Node-Token": registered},
     )
+    assert r.status_code == 401
+
+
+def test_revoke_node_rejected_without_operator_token(client, registered):
+    r = client.delete("/nodes/node1")
     assert r.status_code == 401
 
 
@@ -332,14 +357,20 @@ def test_post_job_creates_job(client, registered):
     r = client.post(
         "/jobs",
         json={"node": "node1", "command": "uptime"},
+        headers=_op(),
     )
     assert r.status_code == 200
     assert "job" in r.json()
 
 
+def test_post_job_rejected_without_operator_token(client, registered):
+    r = client.post("/jobs", json={"node": "node1", "command": "uptime"})
+    assert r.status_code == 401
+
+
 def test_get_jobs_returns_list(client, registered):
     store.create_job("node1", "uptime")
-    r = client.get("/jobs")
+    r = client.get("/jobs", headers=_op())
     assert r.status_code == 200
     jobs = r.json()
     assert len(jobs) == 1
@@ -347,9 +378,14 @@ def test_get_jobs_returns_list(client, registered):
 
 
 def test_get_jobs_empty_when_none(client):
-    r = client.get("/jobs")
+    r = client.get("/jobs", headers=_op())
     assert r.status_code == 200
     assert r.json() == []
+
+
+def test_get_jobs_rejected_without_operator_token(client):
+    r = client.get("/jobs")
+    assert r.status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +397,7 @@ def test_get_job_logs(client, registered):
     store.store_log(jid, "line one")
     store.store_log(jid, "line two")
 
-    r = client.get(f"/jobs/{jid}/logs")
+    r = client.get(f"/jobs/{jid}/logs", headers=_op())
     assert r.status_code == 200
     lines = [entry["line"] for entry in r.json()]
     assert lines == ["line one", "line two"]
@@ -369,9 +405,15 @@ def test_get_job_logs(client, registered):
 
 def test_get_job_logs_empty(client):
     jid = store.create_job("node1", "uptime")
-    r = client.get(f"/jobs/{jid}/logs")
+    r = client.get(f"/jobs/{jid}/logs", headers=_op())
     assert r.status_code == 200
     assert r.json() == []
+
+
+def test_get_job_logs_rejected_without_operator_token(client):
+    jid = store.create_job("node1", "uptime")
+    r = client.get(f"/jobs/{jid}/logs")
+    assert r.status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -382,19 +424,33 @@ def test_post_workload_creates_workload(client):
     r = client.post(
         "/workloads",
         json={"name": "workers", "command": "uptime", "replicas": 3},
+        headers=_op(),
     )
     assert r.status_code == 200
     assert r.json()["ok"] is True
 
 
+def test_post_workload_rejected_without_operator_token(client):
+    r = client.post(
+        "/workloads",
+        json={"name": "workers", "command": "uptime", "replicas": 3},
+    )
+    assert r.status_code == 401
+
+
 def test_get_workloads_returns_list(client):
     store.create_workload("workers", "uptime", 3)
-    r = client.get("/workloads")
+    r = client.get("/workloads", headers=_op())
     assert r.status_code == 200
     workloads = r.json()
     assert len(workloads) == 1
     assert workloads[0]["name"] == "workers"
     assert workloads[0]["replicas"] == 3
+
+
+def test_get_workloads_rejected_without_operator_token(client):
+    r = client.get("/workloads")
+    assert r.status_code == 401
 
 
 def test_post_workload_with_image_and_constraints(client):
@@ -407,10 +463,11 @@ def test_post_workload_with_image_and_constraints(client):
             "image": "alpine",
             "constraints": {"region": "homelab"},
         },
+        headers=_op(),
     )
     assert r.status_code == 200
 
-    workloads = client.get("/workloads").json()
+    workloads = client.get("/workloads", headers=_op()).json()
     w = workloads[0]
     assert w["image"] == "alpine"
     assert w["constraints"]["region"] == "homelab"
@@ -423,7 +480,7 @@ def test_post_workload_with_image_and_constraints(client):
 def test_scale_workload(client, registered):
     store.create_workload("workers", "uptime", 3)
 
-    r = client.post("/workloads/workers/scale", json={"replicas": 1})
+    r = client.post("/workloads/workers/scale", json={"replicas": 1}, headers=_op())
     assert r.status_code == 200
     data = r.json()
     assert data["ok"] is True
@@ -431,15 +488,21 @@ def test_scale_workload(client, registered):
 
 
 def test_scale_workload_not_found(client):
-    r = client.post("/workloads/nonexistent/scale", json={"replicas": 1})
+    r = client.post("/workloads/nonexistent/scale", json={"replicas": 1}, headers=_op())
     assert r.status_code == 404
+
+
+def test_scale_workload_rejected_without_operator_token(client):
+    store.create_workload("workers", "uptime", 3)
+    r = client.post("/workloads/workers/scale", json={"replicas": 1})
+    assert r.status_code == 401
 
 
 def test_scale_down_cancels_excess_jobs(client, registered):
     store.create_workload("workers", "uptime", 3)
     api.reconcile_once()
 
-    r = client.post("/workloads/workers/scale", json={"replicas": 1})
+    r = client.post("/workloads/workers/scale", json={"replicas": 1}, headers=_op())
     assert r.json()["cancelled"] == 2
 
 
@@ -451,13 +514,19 @@ def test_delete_workload(client, registered):
     store.create_workload("workers", "uptime", 2)
     api.reconcile_once()
 
-    r = client.delete("/workloads/workers")
+    r = client.delete("/workloads/workers", headers=_op())
     assert r.status_code == 200
     data = r.json()
     assert data["ok"] is True
     assert data["cancelled"] == 2
 
-    assert client.get("/workloads").json() == []
+    assert client.get("/workloads", headers=_op()).json() == []
+
+
+def test_delete_workload_rejected_without_operator_token(client, registered):
+    store.create_workload("workers", "uptime", 2)
+    r = client.delete("/workloads/workers")
+    assert r.status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -465,7 +534,7 @@ def test_delete_workload(client, registered):
 # ---------------------------------------------------------------------------
 
 def test_get_events(client, registered):
-    r = client.get("/events")
+    r = client.get("/events", headers=_op())
     assert r.status_code == 200
     events = r.json()
     # Registration should have produced an event
@@ -474,6 +543,11 @@ def test_get_events(client, registered):
 
 
 def test_get_events_empty_initially(client):
-    r = client.get("/events")
+    r = client.get("/events", headers=_op())
     assert r.status_code == 200
     assert r.json() == []
+
+
+def test_get_events_rejected_without_operator_token(client):
+    r = client.get("/events")
+    assert r.status_code == 401
