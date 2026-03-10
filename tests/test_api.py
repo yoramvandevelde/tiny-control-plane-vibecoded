@@ -111,6 +111,24 @@ def test_register_with_labels(client):
     assert nodes["node1"]["labels"]["region"] == "homelab"
 
 
+def test_register_with_total_resources(client):
+    r = client.post(
+        "/register",
+        json={
+            "node": "node1",
+            "address": "http://localhost:9000",
+            "total_cpu": 16,
+            "total_mem_mb": 32768,
+        },
+        headers={"X-Bootstrap-Token": BOOTSTRAP},
+    )
+    assert r.status_code == 200
+
+    nodes = client.get("/nodes", headers=_op()).json()
+    assert nodes["node1"]["total_cpu"] == 16
+    assert nodes["node1"]["total_mem_mb"] == 32768
+
+
 # ---------------------------------------------------------------------------
 # /state
 # ---------------------------------------------------------------------------
@@ -511,6 +529,27 @@ def test_post_workload_with_image_and_constraints(client):
     w = workloads[0]
     assert w["image"] == "alpine"
     assert w["constraints"]["region"] == "homelab"
+
+
+def test_post_workload_with_resource_requests(client):
+    r = client.post(
+        "/workloads",
+        json={
+            "name": "heavy-workers",
+            "command": "echo hello",
+            "replicas": 2,
+            "image": "alpine",
+            "req_cpu": 4,
+            "req_mem_mb": 2048,
+        },
+        headers=_op(),
+    )
+    assert r.status_code == 200
+
+    workloads = client.get("/workloads", headers=_op()).json()
+    w = workloads[0]
+    assert w["req_cpu"] == 4
+    assert w["req_mem_mb"] == 2048
 
 
 # ---------------------------------------------------------------------------

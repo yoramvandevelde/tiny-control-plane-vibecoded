@@ -156,6 +156,7 @@ def nodes():
     table.add_column("health",  no_wrap=True)
     table.add_column("cpu",     justify="right", no_wrap=True)
     table.add_column("mem",     justify="right", no_wrap=True)
+    table.add_column("capacity", justify="right", no_wrap=True)
     table.add_column("address", no_wrap=True, style="dim")
 
     for node_id in sorted(data):
@@ -165,10 +166,13 @@ def nodes():
         state   = info.get("state", {})
         cpu     = f"{state.get('cpu', 0):.0%}" if state else "-"
         mem     = f"{state.get('mem', 0):.0%}" if state else "-"
-        version = info.get("version") or "[dim]unknown[/dim]"
-        address = info.get("address") or "-"
+        version   = info.get("version") or "[dim]unknown[/dim]"
+        total_cpu = info.get("total_cpu", 1)
+        total_mem = info.get("total_mem_mb", 512)
+        capacity  = f"{total_cpu} CPU / {total_mem} MiB"
+        address   = info.get("address") or "-"
 
-        table.add_row(node_id, version, health, cpu, mem, address)
+        table.add_row(node_id, version, health, cpu, mem, capacity, address)
 
     console.print(table)
 
