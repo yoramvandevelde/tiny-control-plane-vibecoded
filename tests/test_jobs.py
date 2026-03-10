@@ -168,3 +168,15 @@ def test_finish_job_does_not_overwrite_lost(tmp_path):
     finish_job(jid, JobStatus.SUCCEEDED, "output")
 
     assert list_jobs()[0]["status"] == JobStatus.LOST
+
+
+def test_pending_job_returns_oldest_created(tmp_path):
+    _setup(tmp_path)
+
+    first = create_job("node1", "echo first", image="alpine")
+    second = create_job("node1", "echo second", image="alpine")
+
+    row = get_pending_job("node1")
+    assert row is not None
+    assert row[0] == first
+    assert row[0] != second
