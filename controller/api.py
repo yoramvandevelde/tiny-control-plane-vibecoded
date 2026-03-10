@@ -5,6 +5,7 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, HTTPException
+from sse_starlette.sse import EventSourceResponse
 
 from controller.store import (
     JobStatus,
@@ -278,6 +279,33 @@ def jobs():
 def job_logs(job_id: str):
     """Return all log lines for a job."""
     return get_logs(job_id)
+
+
+@app.get("/jobs/{job_id}/logs/stream")
+async def job_logs_stream(job_id: str):
+    """
+    Stream log lines for a job using Server-Sent Events.
+    Replays all existing lines first, then tails new ones as they arrive.
+    The stream closes automatically when the job reaches a terminal state
+    and all lines have been delivered.
+    """
+    async def generator():
+        cursor = 0
+        while True:
+            lines = get_logs(job_id)
+            for entry in lines[cursor:]:
+                yield {"data": entry["line"]}
+            cursor = len(lines)
+
+            # Stop streaming once the job is terminal and we've sent all lines.
+            job_list = list_jobs()
+            job = next((j for j in job_list if j["id"] == job_id), None)
+            if job and job["status"] in ("succeeded", "failed", "lost"):
+                break
+
+            await asyncio.sleep(0.5)
+
+    return EventSourceResponse(generator())
 
 
 @app.post("/workloads")

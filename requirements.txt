@@ -1,4 +1,3 @@
-
 fastapi
 uvicorn
 httpx
@@ -6,3 +5,4 @@ psutil
 typer
 rich
 prometheus-client
+sse-starlette
