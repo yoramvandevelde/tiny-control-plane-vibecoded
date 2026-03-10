@@ -218,6 +218,7 @@ def register(data: dict, x_bootstrap_token: str | None = Header(None)):
     """
     Register a new node. Requires the shared bootstrap token.
     Returns a per-node token that the agent must use for all subsequent calls.
+    The agent version string is stored if provided.
     """
     if x_bootstrap_token != get_bootstrap_token():
         raise HTTPException(status_code=401, detail="invalid bootstrap token")
@@ -226,6 +227,7 @@ def register(data: dict, x_bootstrap_token: str | None = Header(None)):
         data["address"],
         data.get("labels"),
         data.get("capacity"),
+        data.get("version"),
     )
     return {"ok": True, "token": token}
 
@@ -297,7 +299,7 @@ def agent_cancel(node: str, x_node_token: str | None = Header(None)):
 
 @app.get("/nodes")
 def nodes(x_operator_token: str | None = Header(None)):
-    """Return all registered nodes and their current state."""
+    """Return all registered nodes and their current state, including agent version."""
     require_operator_auth(x_operator_token)
     return list_nodes()
 

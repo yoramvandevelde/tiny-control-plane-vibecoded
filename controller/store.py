@@ -50,9 +50,18 @@ def init_db(path: str = None):
             healthy    INTEGER,
             last_seen  REAL,
             state_json TEXT,
-            token      TEXT
+            token      TEXT,
+            version    TEXT
         )
     """)
+
+    # Migrate existing databases that lack the version column.
+    existing_cols = {
+        row[1]
+        for row in db.execute("PRAGMA table_info(nodes)").fetchall()
+    }
+    if "version" not in existing_cols:
+        db.execute("ALTER TABLE nodes ADD COLUMN version TEXT")
 
     db.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
@@ -136,7 +145,7 @@ class JobStatus:
 # Node operations
 # ---------------------------------------------------------------------------
 
-def register_node(node_id: str, address: str, labels: dict = None, capacity: dict = None) -> str:
+def register_node(node_id: str, address: str, labels: dict = None, capacity: dict = None, version: str = None) -> str:
     """
     Register or re-register a node. Generates a fresh per-node token and
     returns it — the agent must include this token in all subsequent requests.
@@ -144,7 +153,7 @@ def register_node(node_id: str, address: str, labels: dict = None, capacity: dic
     token = str(uuid.uuid4())
     with _db_lock:
         get_db().execute(
-            "INSERT OR REPLACE INTO nodes VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO nodes VALUES (?,?,?,?,?,?,?,?,?)",
             (
                 node_id,
                 address,
@@ -154,10 +163,12 @@ def register_node(node_id: str, address: str, labels: dict = None, capacity: dic
                 time.time(),
                 None,
                 token,
+                version,
             ),
         )
         get_db().commit()
-    record_event("node.registered", f"node {node_id} registered at {address}")
+    version_part = f" v{version}" if version else ""
+    record_event("node.registered", f"node {node_id}{version_part} registered at {address}")
     return token
 
 
@@ -186,22 +197,30 @@ def update_state(node_id: str, state: dict):
     """
     Update a node's reported state (CPU, memory, etc.) and mark it as seen.
     A node is considered healthy when CPU and memory are both below 90%.
+    The version field is updated whenever the agent includes it in the state report.
     """
     cpu     = state.get("cpu", 0)
     mem     = state.get("mem", 0)
     healthy = int(cpu < 0.9 and mem < 0.9)
+    version = state.get("version")
     with _db_lock:
-        get_db().execute(
-            "UPDATE nodes SET state_json=?, last_seen=?, healthy=? WHERE id=?",
-            (json.dumps(state), time.time(), healthy, node_id),
-        )
+        if version is not None:
+            get_db().execute(
+                "UPDATE nodes SET state_json=?, last_seen=?, healthy=?, version=? WHERE id=?",
+                (json.dumps(state), time.time(), healthy, version, node_id),
+            )
+        else:
+            get_db().execute(
+                "UPDATE nodes SET state_json=?, last_seen=?, healthy=? WHERE id=?",
+                (json.dumps(state), time.time(), healthy, node_id),
+            )
         get_db().commit()
 
 
 def list_nodes() -> dict:
     """Return all registered nodes keyed by node ID."""
     rows = get_db().execute(
-        "SELECT id, address, labels, capacity, healthy, state_json, last_seen FROM nodes"
+        "SELECT id, address, labels, capacity, healthy, state_json, last_seen, version FROM nodes"
     ).fetchall()
 
     return {
@@ -212,6 +231,7 @@ def list_nodes() -> dict:
             "healthy":   bool(r[4]),
             "state":     json.loads(r[5]) if r[5] else {},
             "last_seen": r[6],
+            "version":   r[7],
         }
         for r in rows
     }
@@ -538,7 +558,6 @@ def get_pending_cancels(node_id: str) -> list:
             get_db().commit()
 
     return job_ids
-
 
 
 # ---------------------------------------------------------------------------

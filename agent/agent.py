@@ -13,6 +13,12 @@ import httpx
 import psutil
 
 # ---------------------------------------------------------------------------
+# Version
+# ---------------------------------------------------------------------------
+
+VERSION = "0.1.0"
+
+# ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
@@ -188,6 +194,7 @@ def _do_register() -> str:
             "node":    node,
             "address": address,
             "labels":  parse_labels(args.label),
+            "version": VERSION,
         },
         headers={"X-Bootstrap-Token": bootstrap_token},
     )
@@ -197,7 +204,7 @@ def _do_register() -> str:
 
     token = r.json()["token"]
     _save_token(token)
-    print(f"[agent] registered as {node}")
+    print(f"[agent] registered as {node} (version {VERSION})")
     return token
 
 
@@ -230,6 +237,7 @@ def collect_state() -> dict:
         "cpu":       psutil.cpu_percent() / 100,
         "mem":       psutil.virtual_memory().percent / 100,
         "disk_free": disk.free / disk.total,
+        "version":   VERSION,
     }
 
 

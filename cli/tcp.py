@@ -148,7 +148,29 @@ def _build_status_table(job_list: list, now: float) -> Table:
 def nodes():
     """List all registered nodes and their current health state."""
     r = httpx.get(f"{API}/nodes", headers=_operator_headers())
-    console.print(r.json())
+    data = r.json()
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("node",    no_wrap=True)
+    table.add_column("version", no_wrap=True, style="dim")
+    table.add_column("health",  no_wrap=True)
+    table.add_column("cpu",     justify="right", no_wrap=True)
+    table.add_column("mem",     justify="right", no_wrap=True)
+    table.add_column("address", no_wrap=True, style="dim")
+
+    for node_id in sorted(data):
+        info    = data[node_id]
+        healthy = info.get("healthy", False)
+        health  = "[green]healthy[/green]" if healthy else "[red]unhealthy[/red]"
+        state   = info.get("state", {})
+        cpu     = f"{state.get('cpu', 0):.0%}" if state else "-"
+        mem     = f"{state.get('mem', 0):.0%}" if state else "-"
+        version = info.get("version") or "[dim]unknown[/dim]"
+        address = info.get("address") or "-"
+
+        table.add_row(node_id, version, health, cpu, mem, address)
+
+    console.print(table)
 
 
 @app.command()
@@ -195,7 +217,8 @@ def _build_topology(nodes_data: dict, job_list: list):
         cpu       = state.get("cpu", 0)
         mem       = state.get("mem", 0)
         job_count = len(by_node.get(node_id, []))
-        stats     = f"[dim]cpu={cpu:.2f} mem={mem:.2f} jobs={job_count}[/dim]"
+        version   = info.get("version") or "unknown"
+        stats     = f"[dim]v{version}  cpu={cpu:.2f} mem={mem:.2f} jobs={job_count}[/dim]"
         node_tree = cluster.add(f"[bold]{node_id}[/bold]  {health}  {stats}")
 
         active_jobs = by_node.get(node_id, [])
