@@ -153,16 +153,25 @@ class JobStatus:
 # Node operations
 # ---------------------------------------------------------------------------
 
-def register_node(node_id: str, address: str, labels: dict = None, capacity: dict = None, version: str = None) -> str:
+def register_node(
+    node_id: str,
+    address: str,
+    labels: dict = None,
+    capacity: dict = None,
+    version: str = None,
+    total_cpu: int = None,
+    total_mem_mb: int = None,
+) -> str:
     """
     Register or re-register a node. Generates a fresh per-node token and
     returns it — the agent must include this token in all subsequent requests.
     Capacity should be a dict with optional keys "cpu" (int) and "mem" (int, MiB).
+    total_cpu and total_mem_mb override capacity if provided.
     """
     token = str(uuid.uuid4())
     cap = capacity or {}
-    total_cpu    = cap.get("cpu", 1)
-    total_mem_mb = cap.get("mem", 512)
+    total_cpu_val = total_cpu if total_cpu is not None else cap.get("cpu", 1)
+    total_mem_val = total_mem_mb if total_mem_mb is not None else cap.get("mem", 512)
     with _db_lock:
         get_db().execute(
             """
@@ -181,8 +190,8 @@ def register_node(node_id: str, address: str, labels: dict = None, capacity: dic
                 None,
                 token,
                 version,
-                total_cpu,
-                total_mem_mb,
+                total_cpu_val,
+                total_mem_val,
             ),
         )
         get_db().commit()

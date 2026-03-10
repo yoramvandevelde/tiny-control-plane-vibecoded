@@ -250,6 +250,8 @@ def register(data: dict, x_bootstrap_token: str | None = Header(None)):
         data.get("labels"),
         data.get("capacity"),
         data.get("version"),
+        total_cpu=data.get("total_cpu"),
+        total_mem_mb=data.get("total_mem_mb"),
     )
     return {"ok": True, "token": token}
 
@@ -408,6 +410,8 @@ def workload(data: dict, x_operator_token: str | None = Header(None)):
         image=data["image"],
         constraints=data.get("constraints"),
         resources=data.get("resources"),
+        req_cpu=data.get("req_cpu", 0),
+        req_mem_mb=data.get("req_mem_mb", 0),
     )
     return {"ok": True}
 

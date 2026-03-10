@@ -156,6 +156,12 @@ def test_agent_register_payload_includes_version(monkeypatch):
     monkeypatch.setenv("TCP_BOOTSTRAP_TOKEN", "bootstrap")
     monkeypatch.setattr(agent_module, "_resolve_address", lambda: "http://10.0.0.1:9000")
     monkeypatch.setattr(agent_module, "_save_token", lambda t: None)
+    monkeypatch.setattr(agent_module.psutil, "cpu_count", lambda logical=True: 8)
+
+    class _Mem:
+        total = 16 * 1024 * 1024 * 1024
+
+    monkeypatch.setattr(agent_module.psutil, "virtual_memory", lambda: _Mem())
 
     sent = []
 
@@ -171,6 +177,8 @@ def test_agent_register_payload_includes_version(monkeypatch):
     agent_module._do_register()
 
     assert sent[0]["version"] == agent_module.VERSION
+    assert sent[0]["total_cpu"] == 8
+    assert sent[0]["total_mem_mb"] == 16384
 
 
 # ---------------------------------------------------------------------------
