@@ -230,9 +230,13 @@ def finish_job(job_id, status, result):
     if status == "finished":
         status = JobStatus.SUCCEEDED
     with _db_lock:
+        # Only update if the job is still in a non-terminal state.
+        # This prevents a late result from overwriting lost/cancelled status.
+        placeholders = ",".join("?" * len(JobStatus.TERMINAL))
         get_db().execute(
-            "UPDATE jobs SET status=?, result=?, updated=?, lease_expires=NULL WHERE id=?",
-            (status, result, time.time(), job_id)
+            f"UPDATE jobs SET status=?, result=?, updated=?, lease_expires=NULL "
+            f"WHERE id=? AND status NOT IN ({placeholders})",
+            (status, result, time.time(), job_id, *JobStatus.TERMINAL)
         )
         get_db().commit()
 

@@ -250,6 +250,9 @@ def scale_workload(name: str, data: dict):
 
 @app.delete("/workloads/{name}")
 def remove_workload(name: str):
+    # Zero replicas first so the reconciler cannot schedule new jobs
+    # if it runs between the cancel and delete steps.
+    update_workload_replicas(name, 0)
     excess = get_excess_workload_jobs(name, 0)
     for job_id, node_id in excess:
         cancel_job(job_id, node_id)

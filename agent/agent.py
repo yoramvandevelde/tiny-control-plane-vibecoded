@@ -1,4 +1,4 @@
-import socket, psutil, httpx, subprocess, argparse, time, threading, queue, os, sys, signal, tempfile
+import socket, psutil, httpx, subprocess, argparse, time, threading, queue, os, sys, signal, shlex
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--node-id", default=socket.gethostname())
@@ -86,64 +86,54 @@ def register():
     print(f"[agent] registered as {node}")
 
 
-def run_shell(command: str) -> tuple[subprocess.Popen, str]:
+def run_docker(image: str, command: str, container_name: str = "") -> subprocess.Popen:
+    """Start a docker container and return the Popen handle. Caller must wait()."""
+    cmd = ["docker", "run", "--rm", "--network", "none"]
+    if container_name:
+        cmd += ["--name", container_name]
+    cmd.append(image)
+    if command:
+        cmd += shlex.split(command)
+
     proc = subprocess.Popen(
-        command,
-        shell=True,
+        cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
-    out, _ = proc.communicate()
-    return proc, out.decode()
-
-
-def run_docker(image: str, command: str) -> tuple[str, str]:
-    """Returns (container_id, output)."""
-    # Use --cidfile to capture the container ID for later cancellation.
-    # mktemp gives us a path without creating the file — Docker requires the
-    # cidfile to not exist before it starts.
-    cidfile = tempfile.mktemp(suffix=".cid")
-
-    cmd = ["docker", "run", "--rm", "--network", "none", f"--cidfile={cidfile}", image]
-    if command:
-        cmd += command.split()
-
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
-        out, _ = proc.communicate()
-        try:
-            container_id = open(cidfile).read().strip()
-        except Exception:
-            container_id = ""
-        return container_id, out.decode(), proc.returncode
-    finally:
-        try:
-            os.unlink(cidfile)
-        except Exception:
-            pass
+    proc._container_name = container_name
+    return proc
 
 
 def execute(job: dict) -> tuple[str, str]:
     job_id = job["job"]
     try:
         if job.get("image"):
-            container_id, out, returncode = run_docker(job["image"], job["command"])
+            # Use a deterministic container name so kill_job can always find it
+            container_name = f"tcp-{job_id[:16]}"
+            proc = run_docker(job["image"], job["command"], container_name=container_name)
+
             with _processes_lock:
-                _processes[job_id] = ("docker", container_id)
-            if returncode != 0:
-                return STATUS_FAILED, out
-            return STATUS_SUCCEEDED, out
+                _processes[job_id] = ("docker", container_name)
+
+            out, _ = proc.communicate()
+
+            if proc.returncode != 0:
+                return STATUS_FAILED, out.decode()
+            return STATUS_SUCCEEDED, out.decode()
         else:
-            proc, out = run_shell(job["command"])
+            proc = subprocess.Popen(
+                job["command"],
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
             with _processes_lock:
                 _processes[job_id] = ("shell", proc)
+
+            out, _ = proc.communicate()
             if proc.returncode != 0:
-                return STATUS_FAILED, out
-            return STATUS_SUCCEEDED, out
+                return STATUS_FAILED, out.decode()
+            return STATUS_SUCCEEDED, out.decode()
     except Exception as e:
         return STATUS_FAILED, str(e)
 

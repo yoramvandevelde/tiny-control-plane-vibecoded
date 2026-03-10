@@ -154,3 +154,17 @@ def test_list_jobs_includes_timestamps(tmp_path):
     assert job["updated"] is not None
     # updated should be >= created after start_job
     assert job["updated"] >= job["created"]
+
+
+def test_finish_job_does_not_overwrite_lost(tmp_path):
+    """A late result from an agent should not overwrite a lost/cancelled status."""
+    _setup(tmp_path)
+
+    jid = create_job("node1", "sleep 100")
+    start_job(jid)
+    mark_lost(jid)
+
+    # Simulate agent posting a result after the job was marked lost
+    finish_job(jid, JobStatus.SUCCEEDED, "output")
+
+    assert list_jobs()[0]["status"] == JobStatus.LOST
