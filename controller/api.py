@@ -17,10 +17,12 @@ from controller.store import (
     enqueue_cancel,
     expire_lost_jobs,
     finish_job,
+    get_events_since,
     get_excess_workload_jobs,
     get_logs,
     get_pending_job,
     init_db,
+    list_events,
     list_jobs,
     list_nodes,
     list_workloads,
@@ -359,3 +361,32 @@ def remove_workload(name: str):
         cancel_job(job_id, node_id)
     delete_workload(name)
     return {"ok": True, "cancelled": len(excess)}
+
+
+@app.get("/events")
+def events():
+    """Return the most recent cluster events in chronological order."""
+    return list_events()
+
+
+@app.get("/events/stream")
+async def events_stream():
+    """
+    Stream cluster events using Server-Sent Events.
+    Replays recent history first, then tails new events as they occur.
+    """
+    async def generator():
+        existing = list_events()
+        cursor   = 0
+        for entry in existing:
+            yield {"data": f"{entry['kind']}  {entry['message']}"}
+            cursor = entry["id"]
+
+        while True:
+            new_events = get_events_since(cursor)
+            for entry in new_events:
+                yield {"data": f"{entry['kind']}  {entry['message']}"}
+                cursor = entry["id"]
+            await asyncio.sleep(0.5)
+
+    return EventSourceResponse(generator())

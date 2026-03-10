@@ -221,7 +221,7 @@ def logs(
     """
     if follow:
         # Connect to the SSE stream and print lines as they arrive.
-        with httpx.stream("GET", f"{API}/jobs/{job}/logs/stream") as r:
+        with httpx.stream("GET", f"{API}/jobs/{job}/logs/stream", timeout=None) as r:
             for line in r.iter_lines():
                 if line.startswith("data: "):
                     console.print(line[6:])
@@ -294,6 +294,48 @@ def undeploy(
     """
     r = httpx.delete(f"{API}/workloads/{name}")
     console.print(r.json())
+
+
+
+@app.command()
+def events(
+    follow: bool = typer.Option(False, "--follow", "-f", help="Tail new events as they occur (SSE)."),
+):
+    """
+    Show recent cluster events: node registrations, workload changes, and job lifecycle transitions.
+
+    Use --follow / -f to stream events in real time.
+    """
+    EVENT_COLOUR = {
+        "node.registered": "cyan",
+        "node.revoked":    "red",
+        "workload.created": "green",
+        "workload.scaled":  "yellow",
+        "workload.removed": "red",
+        "job.scheduled":   "dim",
+        "job.started":     "cyan",
+        "job.succeeded":   "green",
+        "job.failed":      "red",
+        "job.lost":        "magenta",
+    }
+
+    def _fmt_event(kind: str, message: str) -> str:
+        colour = EVENT_COLOUR.get(kind, "white")
+        return f"[{colour}]{kind:<20}[/{colour}]  {message}"
+
+    if follow:
+        with httpx.stream("GET", f"{API}/events/stream", timeout=None) as r:
+            for line in r.iter_lines():
+                if line.startswith("data: "):
+                    raw     = line[6:]
+                    parts   = raw.split("  ", 1)
+                    kind    = parts[0] if len(parts) > 0 else raw
+                    message = parts[1] if len(parts) > 1 else ""
+                    console.print(_fmt_event(kind, message))
+    else:
+        r = httpx.get(f"{API}/events")
+        for entry in r.json():
+            console.print(_fmt_event(entry["kind"], entry["message"]))
 
 
 if __name__ == "__main__":

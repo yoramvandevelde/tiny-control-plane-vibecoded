@@ -96,6 +96,15 @@ def init_db(path: str = None):
         )
     """)
 
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS events (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts      REAL,
+            kind    TEXT,
+            message TEXT
+        )
+    """)
+
     db.commit()
 
 
@@ -142,6 +151,7 @@ def register_node(node_id: str, address: str, labels: dict = None, capacity: dic
             ),
         )
         get_db().commit()
+    record_event("node.registered", f"node {node_id} registered at {address}")
     return token
 
 
@@ -163,6 +173,7 @@ def revoke_node(node_id: str):
     with _db_lock:
         get_db().execute("UPDATE nodes SET token=NULL WHERE id=?", (node_id,))
         get_db().commit()
+    record_event("node.revoked", f"node {node_id} revoked")
 
 
 def update_state(node_id: str, state: dict):
@@ -236,6 +247,8 @@ def create_job(
             ),
         )
         get_db().commit()
+    workload_part = f" ({workload_name})" if workload_name else ""
+    record_event("job.scheduled", f"job {jid} scheduled on {node_id}{workload_part}")
     return jid
 
 
@@ -255,6 +268,7 @@ def start_job(job_id: str):
             (JobStatus.RUNNING, time.time(), time.time() + LEASE_SECONDS, job_id),
         )
         get_db().commit()
+    record_event("job.started", f"job {job_id} started")
 
 
 def renew_lease(job_id: str):
@@ -277,12 +291,14 @@ def finish_job(job_id: str, status: str, result: str):
         status = JobStatus.SUCCEEDED
     with _db_lock:
         placeholders = ",".join("?" * len(JobStatus.TERMINAL))
-        get_db().execute(
+        cur = get_db().execute(
             f"UPDATE jobs SET status=?, result=?, updated=?, lease_expires=NULL "
             f"WHERE id=? AND status NOT IN ({placeholders})",
             (status, result, time.time(), job_id, *JobStatus.TERMINAL),
         )
         get_db().commit()
+    if cur.rowcount > 0:
+        record_event(f"job.{status}", f"job {job_id} {status}")
 
 
 def mark_lost(job_id: str):
@@ -293,19 +309,28 @@ def mark_lost(job_id: str):
             (JobStatus.LOST, time.time(), job_id),
         )
         get_db().commit()
+    record_event("job.lost", f"job {job_id} marked lost")
 
 
 def expire_lost_jobs():
     """Mark all RUNNING jobs whose lease has expired as LOST."""
+    now = time.time()
     with _db_lock:
+        # Fetch expired job IDs before updating so we can record individual events.
+        expired = get_db().execute(
+            "SELECT id FROM jobs WHERE status=? AND lease_expires IS NOT NULL AND lease_expires < ?",
+            (JobStatus.RUNNING, now),
+        ).fetchall()
         get_db().execute(
             """
             UPDATE jobs SET status=?, updated=?
             WHERE status=? AND lease_expires IS NOT NULL AND lease_expires < ?
             """,
-            (JobStatus.LOST, time.time(), JobStatus.RUNNING, time.time()),
+            (JobStatus.LOST, now, JobStatus.RUNNING, now),
         )
         get_db().commit()
+    for row in expired:
+        record_event("job.lost", f"job {row[0]} lease expired")
 
 
 def list_jobs() -> list:
@@ -393,6 +418,7 @@ def create_workload(
             (name, command, image, replicas, json.dumps(constraints or {}), json.dumps(resources or {})),
         )
         get_db().commit()
+    record_event("workload.created", f"workload {name} created replicas={replicas}")
 
 
 def update_workload_replicas(name: str, replicas: int) -> bool:
@@ -402,6 +428,8 @@ def update_workload_replicas(name: str, replicas: int) -> bool:
             "UPDATE workloads SET replicas=? WHERE name=?", (replicas, name)
         )
         get_db().commit()
+    if cur.rowcount > 0:
+        record_event("workload.scaled", f"workload {name} scaled to replicas={replicas}")
     return cur.rowcount > 0
 
 
@@ -410,6 +438,7 @@ def delete_workload(name: str):
     with _db_lock:
         get_db().execute("DELETE FROM workloads WHERE name=?", (name,))
         get_db().commit()
+    record_event("workload.removed", f"workload {name} removed")
 
 
 def list_workloads() -> list:
@@ -488,3 +517,35 @@ def get_logs(job_id: str) -> list:
         "SELECT ts, line FROM logs WHERE job_id=? ORDER BY id", (job_id,)
     ).fetchall()
     return [{"ts": r[0], "line": r[1]} for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Event log
+# ---------------------------------------------------------------------------
+
+def record_event(kind: str, message: str):
+    """Append a structured event to the event log."""
+    with _db_lock:
+        get_db().execute(
+            "INSERT INTO events(ts, kind, message) VALUES (?,?,?)",
+            (time.time(), kind, message),
+        )
+        get_db().commit()
+
+
+def list_events(limit: int = 200) -> list:
+    """Return the most recent events in chronological order."""
+    rows = get_db().execute(
+        "SELECT id, ts, kind, message FROM events ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [{"id": r[0], "ts": r[1], "kind": r[2], "message": r[3]} for r in reversed(rows)]
+
+
+def get_events_since(event_id: int) -> list:
+    """Return all events with an id greater than event_id."""
+    rows = get_db().execute(
+        "SELECT id, ts, kind, message FROM events WHERE id > ? ORDER BY id",
+        (event_id,),
+    ).fetchall()
+    return [{"id": r[0], "ts": r[1], "kind": r[2], "message": r[3]} for r in rows]
