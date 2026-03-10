@@ -1,100 +1,68 @@
 # -----------------------------
-
 # Python
-
 # -----------------------------
-
 **pycache**/
 *.py[cod]
 *$py.class
-
-# Compiled extensions
-
 *.so
 
 # -----------------------------
-
 # Virtual environments
-
 # -----------------------------
-
 .venv/
 venv/
 env/
 ENV/
 
 # -----------------------------
-
 # Python packaging
-
 # -----------------------------
-
 build/
 dist/
 *.egg-info/
 .eggs/
 
 # -----------------------------
-
 # Logs
-
 # -----------------------------
-
 *.log
 
 # -----------------------------
-
 # Database
-
 # -----------------------------
-
 cluster.db
+cluster.db-shm
+cluster.db-wal
 *.sqlite
 *.sqlite3
 
 # -----------------------------
-
 # Uvicorn / dev server artifacts
-
 # -----------------------------
-
 .reload
 *.pid
 
 # -----------------------------
-
 # Environment files
-
 # -----------------------------
-
 .env
 .env.*
 
 # -----------------------------
-
 # macOS
-
 # -----------------------------
-
 .DS_Store
 .AppleDouble
 .LSOverride
 
 # -----------------------------
-
 # Editors
-
 # -----------------------------
-
 .vscode/
 .idea/
 
 # -----------------------------
-
 # Temporary files
-
-# ---
-
-cluster.db
-cluster.db-shm
-cluster.db-wal
+# -----------------------------
+*.tmp
+*.swp
