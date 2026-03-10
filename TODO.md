@@ -30,4 +30,4 @@
 
 - [ ] **Node drain** — add `tcp drain <node>` that marks the node as unschedulable, lets running jobs finish (or optionally cancels and reschedules them elsewhere), then allows safe removal or maintenance.
 
-- [ ] **Resource-aware scheduling** — the highest-value feature addition. Scheduling currently ignores capacity entirely despite the data model already being in place. Add `--cpu` and `--mem` to both `tcp deploy` and agent registration, track allocated resources per node in the scheduler, and only place a job if the node has sufficient headroom.
+- [X] **Resource-aware scheduling** — the highest-value feature addition. Scheduling currently ignores capacity entirely despite the data model already being in place. Add `--cpu` and `--mem` to both `tcp deploy` and agent registration, track allocated resources per node in the scheduler, and only place a job if the node has sufficient headroom.
