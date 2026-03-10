@@ -93,9 +93,11 @@ def init_db(path: str = None):
 
     db.execute("""
         CREATE TABLE IF NOT EXISTS cancel_jobs (
-            job_id  TEXT PRIMARY KEY,
-            node_id TEXT,
-            created REAL
+            job_id    TEXT PRIMARY KEY,
+            node_id   TEXT,
+            created   REAL,
+            delivered REAL,
+            acked     REAL
         )
     """)
 
@@ -500,24 +502,43 @@ def enqueue_cancel(job_id: str, node_id: str):
         get_db().commit()
 
 
-def pop_cancel_jobs(node_id: str) -> list:
+def get_pending_cancels(node_id: str) -> list:
     """
-    Return and atomically remove all pending cancellations for a node.
-    Exactly-once delivery: if the agent misses a cycle it will not receive
-    the same cancellations again.
+    Return cancellations that have not yet been delivered to the agent.
+
+    Cancels are marked delivered instead of removed so they survive
+    controller restarts until the agent acknowledges them.
     """
+    now = time.time()
+
     with _db_lock:
         rows = get_db().execute(
-            "SELECT job_id FROM cancel_jobs WHERE node_id=?", (node_id,)
+            """
+            SELECT job_id
+            FROM cancel_jobs
+            WHERE node_id = ?
+            AND acked IS NULL
+            AND delivered IS NULL
+            """,
+            (node_id,),
         ).fetchall()
-        if rows:
-            placeholders = ",".join("?" * len(rows))
-            job_ids = [r[0] for r in rows]
+
+        job_ids = [r[0] for r in rows]
+
+        if job_ids:
+            placeholders = ",".join("?" * len(job_ids))
             get_db().execute(
-                f"DELETE FROM cancel_jobs WHERE job_id IN ({placeholders})", job_ids
+                f"""
+                UPDATE cancel_jobs
+                SET delivered = ?
+                WHERE job_id IN ({placeholders})
+                """,
+                [now, *job_ids],
             )
             get_db().commit()
-    return [r[0] for r in rows]
+
+    return job_ids
+
 
 
 # ---------------------------------------------------------------------------
@@ -572,3 +593,19 @@ def get_events_since(event_id: int) -> list:
         (event_id,),
     ).fetchall()
     return [{"id": r[0], "ts": r[1], "kind": r[2], "message": r[3]} for r in rows]
+
+
+def ack_cancel(job_id: str, node_id: str):
+    """
+    Mark a cancel request as acknowledged by the agent.
+    """
+    with _db_lock:
+        get_db().execute(
+            """
+            UPDATE cancel_jobs
+            SET acked = ?
+            WHERE job_id = ? AND node_id = ?
+            """,
+            (time.time(), job_id, node_id),
+        )
+        get_db().commit()

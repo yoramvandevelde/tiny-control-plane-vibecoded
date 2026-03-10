@@ -5,7 +5,7 @@ from controller.store import (
     create_job,
     start_job,
     enqueue_cancel,
-    pop_cancel_jobs,
+    get_pending_cancels,
     mark_lost,
 )
 from controller.api import reconcile_once, cancel_job
@@ -25,7 +25,7 @@ def test_enqueue_and_pop_cancel(tmp_path):
 
     enqueue_cancel(job_id, "node1")
 
-    result = pop_cancel_jobs("node1")
+    result = get_pending_cancels("node1")
     assert job_id in result
 
 
@@ -37,10 +37,10 @@ def test_pop_cancel_clears_queue(tmp_path):
     start_job(job_id)
 
     enqueue_cancel(job_id, "node1")
-    pop_cancel_jobs("node1")
+    get_pending_cancels("node1")
 
     # Second pop should be empty
-    assert pop_cancel_jobs("node1") == []
+    assert get_pending_cancels("node1") == []
 
 
 def test_pop_cancel_only_returns_for_correct_node(tmp_path):
@@ -53,8 +53,8 @@ def test_pop_cancel_only_returns_for_correct_node(tmp_path):
 
     enqueue_cancel(job_id, "node1")
 
-    assert pop_cancel_jobs("node2") == []
-    assert job_id in pop_cancel_jobs("node1")
+    assert get_pending_cancels("node2") == []
+    assert job_id in get_pending_cancels("node1")
 
 
 def test_cancel_job_marks_cancelled_and_enqueues(tmp_path):
@@ -70,7 +70,7 @@ def test_cancel_job_marks_cancelled_and_enqueues(tmp_path):
     job = list_jobs()[0]
     assert job["status"] == JobStatus.CANCELLED
 
-    queued = pop_cancel_jobs("node1")
+    queued = get_pending_cancels("node1")
     assert job_id in queued
 
 
@@ -86,7 +86,7 @@ def test_enqueue_multiple_cancels(tmp_path):
     enqueue_cancel(id1, "node1")
     enqueue_cancel(id2, "node1")
 
-    result = pop_cancel_jobs("node1")
+    result = get_pending_cancels("node1")
     assert set(result) == {id1, id2}
 
 
@@ -129,5 +129,5 @@ def test_undeploy_cancels_active_jobs(tmp_path):
 
     jobs = list_jobs()
     assert all(j["status"] == JobStatus.CANCELLED for j in jobs)
-    queued = pop_cancel_jobs("node1")
+    queued = get_pending_cancels("node1")
     assert len(queued) == 2

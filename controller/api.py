@@ -28,7 +28,8 @@ from controller.store import (
     list_workloads,
     mark_cancelled,
     mark_lost,
-    pop_cancel_jobs,
+    get_pending_cancels,
+    ack_cancel,
     record_event,
     register_node,
     renew_lease,
@@ -270,7 +271,7 @@ def agent_cancel(node: str, x_node_token: str | None = Header(None)):
     The agent calls this on every poll cycle and kills the listed jobs.
     """
     require_agent_auth(node, x_node_token)
-    return {"cancel": pop_cancel_jobs(node)}
+    return {"cancel": get_pending_cancels(node)}
 
 
 # ---------------------------------------------------------------------------

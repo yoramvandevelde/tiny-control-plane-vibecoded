@@ -469,3 +469,16 @@ def loop():
 if __name__ == "__main__":
     register()
     loop()
+
+
+def _ack_cancel(controller, job_id, node_id, token):
+    import requests
+    try:
+        requests.post(
+            f"{controller}/agent/cancel/ack",
+            params={"job_id": job_id, "node_id": node_id},
+            headers={"X-Node-Token": token},
+            timeout=5,
+        )
+    except Exception:
+        pass

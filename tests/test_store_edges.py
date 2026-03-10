@@ -13,7 +13,7 @@ from controller.store import (
     get_pending_job,
     get_logs,
     store_log,
-    pop_cancel_jobs,
+    get_pending_cancels,
     create_workload,
     list_workloads,
     update_workload_replicas,
@@ -55,12 +55,12 @@ def test_list_nodes_returns_empty_dict_when_none_registered(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# pop_cancel_jobs — empty table
+# get_pending_cancels — empty table
 # ---------------------------------------------------------------------------
 
-def test_pop_cancel_jobs_returns_empty_list_when_none_queued(tmp_path):
+def test_get_pending_cancels_returns_empty_list_when_none_queued(tmp_path):
     _setup(tmp_path)
-    assert pop_cancel_jobs("node1") == []
+    assert get_pending_cancels("node1") == []
 
 
 # ---------------------------------------------------------------------------
