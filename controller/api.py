@@ -40,6 +40,10 @@ from controller.store import (
     update_state,
     update_workload_replicas,
     verify_node_token,
+    preview_gc,
+    prune_events,
+    prune_jobs,
+    prune_stale_cancel_jobs,
 )
 
 # A node is considered stale if it has not reported state within this window.
@@ -176,6 +180,7 @@ def reconcile_once():
        due to a brief controller restart.
     2. For each workload, schedule new jobs on available nodes until the
        active job count matches the desired replica count.
+    3. Prune stale cancel_jobs rows (acked or agent-gone).
     """
     if time.time() - _startup_time > STARTUP_GRACE_SECONDS:
         expire_lost_jobs()
@@ -203,6 +208,7 @@ def reconcile_once():
                 req_mem_mb=req_mem,
             )
 
+    prune_stale_cancel_jobs()
 
 async def reconcile_loop():
     """Run reconcile_once every 5 seconds in the background."""
@@ -507,3 +513,47 @@ async def events_stream(x_operator_token: str | None = Header(None)):
             await asyncio.sleep(0.5)
 
     return EventSourceResponse(generator())
+
+
+@app.get("/gc/preview")
+def gc_preview(
+    days: float = 7.0,
+    x_operator_token: str | None = Header(None),
+):
+    """
+    Return counts of rows that *would* be removed by POST /gc without deleting anything.
+
+    Query parameter:
+      days  — age threshold in days (default 7)
+    """
+    require_operator_auth(x_operator_token)
+    return preview_gc(days)
+
+
+@app.post("/gc")
+def gc(
+    data: dict,
+    x_operator_token: str | None = Header(None),
+):
+    """
+    Delete old terminal jobs (and their log lines / cancel_jobs entries) and
+    old events. Only rows older than ``days`` days are removed.
+
+    Request body:
+      { "days": 7 }   (days defaults to 7 if omitted)
+    """
+    require_operator_auth(x_operator_token)
+    days = float(data.get("days", 7))
+    if days <= 0:
+        raise HTTPException(status_code=422, detail="days must be > 0")
+
+    job_counts   = prune_jobs(days)
+    events_count = prune_events(days)
+
+    return {
+        "ok":     True,
+        "days":   days,
+        "jobs":   job_counts["jobs"],
+        "events": events_count,
+    }
+

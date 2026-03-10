@@ -118,3 +118,19 @@ Scaling up schedules new jobs on the next reconcile pass. Scaling down immediate
 ## Database Concurrency
 
 `controller/store.py` uses per-thread SQLite connections with a write lock shared between FastAPI request handlers and the reconcile loop. Tests use `tmp_path` fixtures for isolated databases and call `reconcile_once()` directly rather than relying on the async loop.
+
+## Database Maintenance
+
+Terminal jobs (succeeded, failed, cancelled, lost) and cluster events accumulate
+in SQLite indefinitely. Two mechanisms keep the database lean.
+
+**Automatic** — `cancel_jobs` rows are pruned by the reconciler on every pass:
+- Acked rows (agent confirmed receipt) are deleted immediately.
+- Unacked rows older than CANCEL_REDELIVER_SECONDS are deleted — this covers
+agents that died before polling.
+
+No operator action is needed. The reconciler handles this silently alongside
+lease expiry and workload scheduling.
+
+**Manual** — terminal jobs, their log lines, and old events are removed via
+`tcp gc`. See the [CLI Reference](docs/cli.md) for usage.

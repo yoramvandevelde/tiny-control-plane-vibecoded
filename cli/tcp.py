@@ -464,5 +464,61 @@ def events(
             console.print(_fmt_event(entry["kind"], entry["message"], entry.get("ts")))
 
 
+# =============================================================================
+# PATCH — cli/tcp.py
+#
+# Paste the gc() command below before the final:
+#   if __name__ == "__main__":
+#       app()
+# =============================================================================
+
+
+@app.command()
+def gc(
+    days:    float = typer.Option(7.0,   "--days",    help="Delete rows older than this many days."),
+    dry_run: bool  = typer.Option(False, "--dry-run", help="Preview what would be deleted without removing anything."),
+):
+    """
+    Garbage-collect old terminal jobs and events from the database.
+
+    Removes jobs (succeeded/failed/cancelled/lost) and events older than
+    --days days. Log lines and cancel signal entries for pruned jobs are
+    removed automatically.
+
+    Use --dry-run to see what would be deleted without making any changes.
+    """
+    if dry_run:
+        r = httpx.get(
+            f"{API}/gc/preview",
+            params={"days": days},
+            headers=_operator_headers(),
+        )
+        r.raise_for_status()
+        data = r.json()
+
+        table = Table(show_header=True, header_style="bold", title=f"GC preview — older than {data['days']} days")
+        table.add_column("table",          no_wrap=True)
+        table.add_column("rows to delete", justify="right", no_wrap=True)
+        table.add_row("jobs (+ logs, cancel_jobs)", str(data["jobs"]))
+        table.add_row("events",                     str(data["events"]))
+        console.print(table)
+        console.print("[dim]dry run — nothing deleted[/dim]")
+    else:
+        r = httpx.post(
+            f"{API}/gc",
+            json={"days": days},
+            headers=_operator_headers(),
+        )
+        r.raise_for_status()
+        data = r.json()
+
+        table = Table(show_header=True, header_style="bold", title=f"GC complete — older than {data['days']} days")
+        table.add_column("table",        no_wrap=True)
+        table.add_column("rows deleted", justify="right", no_wrap=True)
+        table.add_row("jobs (+ logs, cancel_jobs)", str(data["jobs"]))
+        table.add_row("events",                     str(data["events"]))
+        console.print(table)
+
+
 if __name__ == "__main__":
     app()

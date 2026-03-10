@@ -22,7 +22,7 @@
 
 - [ ] **Job retry policy** — failed jobs stay failed and workloads that always fail spin forever scheduling replacements. Add `--retries` and `--max-attempts` to `tcp deploy`, track attempt count in the DB, and reschedule with backoff only if retries remain.
 
-- [ ] **DB pruning** — terminal jobs and old events accumulate forever. Add `tcp gc` with a configurable age policy, e.g. delete jobs and events older than N days.
+- [X] **DB pruning** — terminal jobs and old events accumulate forever. `cancel_jobs` rows are pruned automatically by the reconciler on every pass (acked rows immediately; unacked rows after `CANCEL_REDELIVER_SECONDS`). Operator-triggered pruning via `tcp gc [--days N] [--dry-run]` removes old terminal jobs (cascading to logs and cancel_jobs) and old events.
 
 - [ ] **Missing CLI commands** — add `tcp workloads` (list all workloads), `tcp describe workload <name>`, `tcp describe job <id>`, and `tcp describe node <id>` for better day-to-day usability.
 

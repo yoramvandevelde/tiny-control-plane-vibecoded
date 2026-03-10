@@ -701,3 +701,92 @@ def ack_cancel(job_id: str, node_id: str):
             (time.time(), job_id, node_id),
         )
         get_db().commit()
+
+# ---------------------------------------------------------------------------
+# Garbage collection
+# ---------------------------------------------------------------------------
+
+def prune_jobs(older_than_days: float) -> dict:
+    """
+    Delete terminal jobs last updated more than older_than_days ago.
+    Cascades to logs and cancel_jobs rows for the same job IDs.
+    Returns a dict with counts of deleted jobs, log rows, and cancel rows.
+    """
+    cutoff = time.time() - older_than_days * 86400
+    placeholders = ",".join("?" * len(JobStatus.TERMINAL))
+    with _db_lock:
+        db = get_db()
+        rows = db.execute(
+            f"SELECT id FROM jobs WHERE status IN ({placeholders}) AND updated < ?",
+            (*JobStatus.TERMINAL, cutoff),
+        ).fetchall()
+        job_ids = [r[0] for r in rows]
+
+        logs_deleted   = 0
+        cancel_deleted = 0
+        if job_ids:
+            id_ph = ",".join("?" * len(job_ids))
+            cur = db.execute(f"DELETE FROM logs        WHERE job_id IN ({id_ph})", job_ids)
+            logs_deleted = cur.rowcount
+            cur = db.execute(f"DELETE FROM cancel_jobs WHERE job_id IN ({id_ph})", job_ids)
+            cancel_deleted = cur.rowcount
+            db.execute(f"DELETE FROM jobs WHERE id IN ({id_ph})", job_ids)
+
+        db.commit()
+
+    return {"jobs": len(job_ids), "logs": logs_deleted, "cancel_jobs": cancel_deleted}
+
+
+def prune_events(older_than_days: float) -> int:
+    """
+    Delete events older than older_than_days. Returns the number of rows deleted.
+    """
+    cutoff = time.time() - older_than_days * 86400
+    with _db_lock:
+        cur = get_db().execute("DELETE FROM events WHERE ts < ?", (cutoff,))
+        get_db().commit()
+    return cur.rowcount
+
+
+def preview_gc(older_than_days: float) -> dict:
+    """
+    Return counts of rows that *would* be removed by prune_jobs / prune_events
+    without deleting anything.
+    """
+    cutoff = time.time() - older_than_days * 86400
+    placeholders = ",".join("?" * len(JobStatus.TERMINAL))
+    db = get_db()
+
+    job_count = db.execute(
+        f"SELECT COUNT(*) FROM jobs WHERE status IN ({placeholders}) AND updated < ?",
+        (*JobStatus.TERMINAL, cutoff),
+    ).fetchone()[0]
+
+    event_count = db.execute(
+        "SELECT COUNT(*) FROM events WHERE ts < ?", (cutoff,)
+    ).fetchone()[0]
+
+    return {"jobs": job_count, "events": event_count, "days": older_than_days}
+
+
+def prune_stale_cancel_jobs() -> int:
+    """
+    Remove cancel_jobs rows that no longer need to be kept:
+      - acked rows (agent confirmed receipt — safe to delete immediately)
+      - unacked rows older than CANCEL_REDELIVER_SECONDS (agent is gone)
+
+    Called automatically from the reconciler on every pass.
+    Returns the number of rows deleted.
+    """
+    stale_cutoff = time.time() - CANCEL_REDELIVER_SECONDS
+    with _db_lock:
+        cur = get_db().execute(
+            """
+            DELETE FROM cancel_jobs
+            WHERE acked IS NOT NULL
+               OR created < ?
+            """,
+            (stale_cutoff,),
+        )
+        get_db().commit()
+    return cur.rowcount

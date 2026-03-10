@@ -19,6 +19,7 @@ tcp status [-f]                                          # job status table; -f 
 tcp jobs                                                 # raw job list (JSON)
 tcp logs <job_id> [-f]                                   # job output; -f stream live
 tcp events [-f]                                          # recent cluster events; -f stream live
+tcp gc [--days N] [--dry-run]                            # delete old jobs and events
 ```
 
 `--image` is required on both `tcp exec` and `tcp deploy`.
@@ -123,6 +124,26 @@ Prints captured container stdout for a job.
 Prints the most recent 200 cluster events.
 
 `-f` streams new events live via SSE.
+
+---
+
+`tcp gc [--days N] [--dry-run]`
+Removes old terminal jobs (succeeded/failed/cancelled/lost) and old events from
+the database. Log lines and cancel signal entries for pruned jobs are removed
+in the same operation.
+
+
+```bash
+tcp gc                  # delete rows older than 7 days (default)
+tcp gc --days 30        # use a custom age threshold
+tcp gc --dry-run        # preview what would be deleted without removing anything
+```
+
+`--dry-run` calls a read-only preview endpoint and prints row counts without
+deleting anything. Use it before running gc on a production cluster.
+
+`cancel_jobs` rows are pruned automatically by the reconciler and do not
+require manual gc.
 
 ---
 
