@@ -12,7 +12,19 @@ from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
 
-API     = "http://localhost:8000"
+# ---------------------------------------------------------------------------
+# Controller address
+#
+# The CLI resolves the controller address in this order:
+#   1. TCP_CONTROLLER environment variable
+#   2. http://localhost:8000 (development default)
+#
+# When running the CLI on a machine other than the controller, set:
+#   export TCP_CONTROLLER=http://10.0.0.5:8000
+# ---------------------------------------------------------------------------
+
+API = os.environ.get("TCP_CONTROLLER", "http://localhost:8000")
+
 app     = typer.Typer(help="Tiny Control Plane — cluster management CLI.")
 console = Console()
 

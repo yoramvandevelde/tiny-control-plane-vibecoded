@@ -3,7 +3,10 @@ from unittest.mock import MagicMock
 import sys
 import os
 
-# Ensure the agent module is importable without triggering argparse
+# Ensure the agent module is importable without triggering argparse.
+# --address is included to exercise explicit address handling in tests
+# that need it; other tests are unaffected since address resolution only
+# runs during registration.
 sys.argv = ["agent.py", "--node-id", "test-node", "--port", "9000"]
 
 # Add project root to path

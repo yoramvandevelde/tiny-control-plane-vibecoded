@@ -18,9 +18,19 @@ import psutil
 # ---------------------------------------------------------------------------
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--node-id", default=socket.gethostname())
-parser.add_argument("--port",    type=int, default=9000)
-parser.add_argument("--label",   action="append", help="Node label in key=value format")
+parser.add_argument("--node-id",  default=socket.gethostname())
+parser.add_argument("--port",     type=int, default=9000)
+parser.add_argument("--label",    action="append", help="Node label in key=value format")
+parser.add_argument(
+    "--address",
+    default=None,
+    help=(
+        "Advertised address of this agent, e.g. http://10.0.0.5:9000. "
+        "If omitted the agent tries to auto-detect its LAN IP by opening a "
+        "temporary socket toward the controller. Falls back to localhost if "
+        "detection fails."
+    ),
+)
 args = parser.parse_args()
 
 CONTROLLER         = os.environ.get("TCP_CONTROLLER", "http://127.0.0.1:8000")
@@ -30,6 +40,46 @@ node = args.node_id
 
 STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED    = "failed"
+
+
+# ---------------------------------------------------------------------------
+# Address resolution
+# ---------------------------------------------------------------------------
+
+def _detect_lan_ip() -> str:
+    """
+    Attempt to discover the local IP address that can reach the controller.
+
+    Opens a UDP socket toward the controller host — no data is actually sent —
+    and reads back the local address the OS selected. Falls back to 127.0.0.1
+    and logs a warning if the controller address cannot be parsed or the socket
+    fails for any reason.
+    """
+    try:
+        # Strip scheme and path, keep host:port
+        host_part = CONTROLLER.split("://", 1)[-1].split("/")[0]
+        host, _, port_str = host_part.partition(":")
+        port = int(port_str) if port_str else 80
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect((host, port))
+            return s.getsockname()[0]
+    except Exception as e:
+        print(f"[{node}] warning: could not auto-detect LAN IP ({e}), falling back to localhost")
+        return "127.0.0.1"
+
+
+def _resolve_address() -> str:
+    """
+    Return the advertised address for this agent.
+
+    Uses --address if provided, otherwise auto-detects the LAN IP and
+    combines it with --port.
+    """
+    if args.address:
+        return args.address
+    ip = _detect_lan_ip()
+    return f"http://{ip}:{args.port}"
+
 
 # ---------------------------------------------------------------------------
 # Token persistence
@@ -129,11 +179,14 @@ def _do_register() -> str:
         print("[agent] TCP_BOOTSTRAP_TOKEN is not set, cannot register")
         sys.exit(1)
 
+    address = _resolve_address()
+    print(f"[{node}] registering with address {address}")
+
     r = httpx.post(
         f"{CONTROLLER}/register",
         json={
             "node":    node,
-            "address": f"http://localhost:{args.port}",
+            "address": address,
             "labels":  parse_labels(args.label),
         },
         headers={"X-Bootstrap-Token": bootstrap_token},

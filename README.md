@@ -32,6 +32,7 @@ Somehow, this still resulted in:
 * streaming logs via SSE
 * cluster event log with lifecycle instrumentation
 * topology view
+* multi-host LAN deployment
 
 ---
 
@@ -305,6 +306,47 @@ python agent/agent.py --node-id node2 --port 9001 --label region=homelab
 
 ---
 
+### Controller address
+
+Agents and the CLI can connect to the controller using any reachable IP address.
+By default both connect to:
+
+    http://127.0.0.1:8000
+
+To run agents or the CLI on other machines or internal networks, set the
+controller address via the environment variable:
+
+    TCP_CONTROLLER=http://10.0.0.5:8000
+
+Example — agent on a remote host:
+
+    TCP_CONTROLLER=http://10.0.0.5:8000 python -m agent.agent --node-id node2 --port 9000
+
+Example — CLI on a remote host:
+
+    TCP_CONTROLLER=http://10.0.0.5:8000 tcp nodes
+
+---
+
+### Agent advertised address
+
+When an agent registers it advertises its own address to the controller. By
+default the agent auto-detects its LAN IP by opening a temporary UDP socket
+toward the controller — no data is sent, the OS simply selects the correct
+outbound interface. If detection fails the agent falls back to `127.0.0.1`
+and logs a warning.
+
+To override this explicitly, use `--address`:
+
+```bash
+python agent/agent.py --node-id node1 --port 9000 --address http://10.0.0.10:9000
+```
+
+Use `--address` when the auto-detected IP is wrong — for example on hosts with
+multiple network interfaces or when running inside a container.
+
+---
+
 # CLI Reference
 
 ```bash
@@ -331,23 +373,3 @@ pytest
 ```
 
 Tests are synchronous and call `reconcile_once()` directly. Each test gets an isolated SQLite database via `tmp_path`.
-
-
-### Controller address
-
-Agents can connect to the controller using any reachable IP address.
-By default the agent connects to:
-
-    http://127.0.0.1:8000
-
-To run agents on other machines or internal networks (for example
-`10.x.x.x`), set the controller address via the environment variable:
-
-    TCP_CONTROLLER=http://10.0.0.5:8000
-
-Example:
-
-    TCP_CONTROLLER=http://10.0.0.5:8000 python -m agent.agent
-
-This allows agents to connect to a controller running on an internal
-network instead of localhost.
