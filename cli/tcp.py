@@ -319,23 +319,33 @@ def events(
         "job.lost":        "magenta",
     }
 
-    def _fmt_event(kind: str, message: str) -> str:
-        colour = EVENT_COLOUR.get(kind, "white")
-        return f"[{colour}]{kind:<20}[/{colour}]  {message}"
+    def _fmt_event(kind: str, message: str, ts: float = None) -> str:
+        import datetime
+        colour    = EVENT_COLOUR.get(kind, "white")
+        time_str  = datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S") if ts else "        "
+        return f"[dim]{time_str}[/dim]  [{colour}]{kind:<20}[/{colour}]  {message}"
 
     if follow:
         with httpx.stream("GET", f"{API}/events/stream", timeout=None) as r:
             for line in r.iter_lines():
                 if line.startswith("data: "):
-                    raw     = line[6:]
-                    parts   = raw.split("  ", 1)
-                    kind    = parts[0] if len(parts) > 0 else raw
-                    message = parts[1] if len(parts) > 1 else ""
-                    console.print(_fmt_event(kind, message))
+                    raw    = line[6:]
+                    # format: "ts|kind  message"
+                    if "|" in raw:
+                        ts_str, rest = raw.split("|", 1)
+                        parts        = rest.split("  ", 1)
+                        kind         = parts[0] if parts else rest
+                        message      = parts[1] if len(parts) > 1 else ""
+                        console.print(_fmt_event(kind.strip(), message, float(ts_str)))
+                    else:
+                        parts   = raw.split("  ", 1)
+                        kind    = parts[0] if parts else raw
+                        message = parts[1] if len(parts) > 1 else ""
+                        console.print(_fmt_event(kind.strip(), message))
     else:
         r = httpx.get(f"{API}/events")
         for entry in r.json():
-            console.print(_fmt_event(entry["kind"], entry["message"]))
+            console.print(_fmt_event(entry["kind"], entry["message"], entry.get("ts")))
 
 
 if __name__ == "__main__":

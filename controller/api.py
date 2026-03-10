@@ -379,13 +379,13 @@ async def events_stream():
         existing = list_events()
         cursor   = 0
         for entry in existing:
-            yield {"data": f"{entry['kind']}  {entry['message']}"}
+            yield {"data": f"{entry['ts']}|{entry['kind']}  {entry['message']}"}
             cursor = entry["id"]
 
         while True:
             new_events = get_events_since(cursor)
             for entry in new_events:
-                yield {"data": f"{entry['kind']}  {entry['message']}"}
+                yield {"data": f"{entry['ts']}|{entry['kind']}  {entry['message']}"}
                 cursor = entry["id"]
             await asyncio.sleep(0.5)
 
