@@ -315,12 +315,14 @@ def mark_lost(job_id: str):
 def mark_cancelled(job_id: str, node_id: str):
     """Mark a job as LOST due to an explicit operator cancellation."""
     with _db_lock:
+        row = get_db().execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+        prev_status = row[0] if row else "unknown"
         get_db().execute(
             "UPDATE jobs SET status=?, updated=? WHERE id=?",
             (JobStatus.LOST, time.time(), job_id),
         )
         get_db().commit()
-    record_event("job.cancelled", f"job {job_id} cancelled on {node_id}")
+    record_event("job.cancelled", f"job {job_id} {prev_status} → cancelled on {node_id}")
 
 
 def expire_lost_jobs():

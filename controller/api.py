@@ -359,7 +359,8 @@ def remove_workload(name: str):
     """
     update_workload_replicas(name, 0, silent=True)
     excess = get_excess_workload_jobs(name, 0)
-    record_event("workload.deleting", f"workload {name} deleting — cancelling {len(excess)} job(s)")
+    node_count = len({node_id for _, node_id in excess})
+    record_event("workload.deleting", f"workload {name} deleting — cancelling {len(excess)} job(s) across {node_count} node(s)")
     for job_id, node_id in excess:
         cancel_job(job_id, node_id)
     delete_workload(name)
