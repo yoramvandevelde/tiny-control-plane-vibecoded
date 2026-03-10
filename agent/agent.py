@@ -23,7 +23,7 @@ parser.add_argument("--port",    type=int, default=9000)
 parser.add_argument("--label",   action="append", help="Node label in key=value format")
 args = parser.parse_args()
 
-CONTROLLER         = "http://localhost:8000"
+CONTROLLER         = os.environ.get("TCP_CONTROLLER", "http://127.0.0.1:8000")
 HEARTBEAT_INTERVAL = 15  # seconds between heartbeat bursts while jobs are running
 
 node = args.node_id

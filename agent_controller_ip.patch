@@ -1,0 +1,28 @@
+diff --git a/README.md b/README.md
+index ae2c051..fd05eb8 100644
+--- a/README.md
++++ b/README.md
+@@ -331,3 +331,23 @@ pytest
+ ```
+ 
+ Tests are synchronous and call `reconcile_once()` directly. Each test gets an isolated SQLite database via `tmp_path`.
++
++
++### Controller address
++
++Agents can connect to the controller using any reachable IP address.
++By default the agent connects to:
++
++    http://127.0.0.1:8000
++
++To run agents on other machines or internal networks (for example
++`10.x.x.x`), set the controller address via the environment variable:
++
++    TCP_CONTROLLER=http://10.0.0.5:8000
++
++Example:
++
++    TCP_CONTROLLER=http://10.0.0.5:8000 python -m agent.agent
++
++This allows agents to connect to a controller running on an internal
++network instead of localhost.
