@@ -52,6 +52,14 @@ Agents poll the controller for work. The controller maintains desired state via 
 
 # Features
 
+### Execution model
+
+Every job — whether a one-off `tcp exec` or a workload replica — runs inside a Docker container. Bare host execution is not supported. A Docker image is required on every job submission and workload declaration, and the controller will reject requests that omit one.
+
+Containers run with `--network none` and clean up after themselves (`--rm`). This keeps workloads isolated and prevents accidental host interference.
+
+---
+
 ### Authentication
 
 The controller uses a three-token system.
@@ -85,7 +93,7 @@ Agents report CPU usage, memory usage, and disk free on every poll cycle. The co
 
 ### Job Queue
 
-Jobs are stored in SQLite. Agents poll for pending jobs assigned to their node ID and execute them locally — either as a shell command or inside a Docker container, depending on whether an image is specified. Jobs run in background threads, so a node can pick up new work while existing jobs are still running.
+Jobs are stored in SQLite. Agents poll for pending jobs assigned to their node ID and execute them inside Docker containers. Jobs run in background threads, so a node can pick up new work while existing jobs are still running.
 
 ---
 
@@ -119,10 +127,7 @@ When an agent picks up a job it receives a lease expiring after 60 seconds. The 
 
 ### Job Cancellation
 
-When a job is cancelled (via scale-down or undeploy), the controller records a cancellation entry for that job's node. The agent polls `GET /agent/cancel/{node}` on every loop iteration. When a cancel is received, the agent terminates the process:
-
-- Shell jobs receive SIGTERM, then SIGKILL after a 5-second grace period.
-- Docker jobs are stopped via `docker stop`, which also sends SIGTERM then SIGKILL.
+When a job is cancelled (via scale-down or undeploy), the controller records a cancellation entry for that job's node. The agent polls `GET /agent/cancel/{node}` on every loop iteration. When a cancel is received, the agent stops the container via `docker stop`, which sends SIGTERM then SIGKILL after a grace period.
 
 Cancellations are delivered exactly once — the poll endpoint is a destructive read.
 
@@ -144,18 +149,17 @@ Jobs are placed using a pipeline of:
 
 ### Docker Execution
 
-Jobs can run inside Docker containers using `docker run --rm --network none`. Containers are named `tcp-{job_id[:16]}` so the agent can reliably stop them by name during cancellation. Containers clean up after themselves and have no outbound network access by default.
+Jobs run inside Docker containers using `docker run --rm --network none`. Containers are named `tcp-{job_id[:16]}` so the agent can reliably stop them by name during cancellation. Containers clean up after themselves and have no outbound network access by default.
 
 ---
 
 ### Workloads
 
-A workload declares a desired number of replicas for a command:
+A workload declares a desired number of replicas for a command. A Docker image is required:
 
 ```bash
-tcp deploy workers uptime 3
 tcp deploy alpine-workers "echo hello" 2 --image alpine
-tcp deploy eu-workers uptime 3 --constraint region=homelab
+tcp deploy eu-workers uptime 3 --image alpine --constraint region=homelab
 ```
 
 The controller ensures the declared number of replicas are always running. If jobs finish, fail, or get lost, the reconciler schedules replacements on the next pass.
@@ -170,7 +174,7 @@ To change the replica count of a running workload:
 tcp scale workers 1
 ```
 
-Scaling up schedules new jobs on the next reconcile pass. Scaling down immediately cancels excess jobs — pending jobs are cancelled before running ones — and sends kill signals to the agents hosting them.
+Scaling up schedules new jobs on the next reconcile pass. Scaling down immediately cancels excess jobs — pending jobs are cancelled before running ones — and sends stop signals to the agents hosting them.
 
 ---
 
@@ -180,7 +184,7 @@ Scaling up schedules new jobs on the next reconcile pass. Scaling down immediate
 tcp undeploy workers
 ```
 
-Cancels all running and pending jobs for the workload, then removes it from the controller. Running jobs are terminated, not left to complete.
+Cancels all running and pending jobs for the workload, then removes it from the controller. Running containers are stopped, not left to complete.
 
 ---
 
@@ -196,13 +200,11 @@ Sets the node token to NULL. The node's next request receives a 401. The agent l
 
 ### Logs
 
-Agent stdout is captured line by line and stored in the controller database.
+Container stdout is captured line by line and stored in the controller database.
 
 ```bash
 tcp logs <job_id> [-f]   # print captured output; -f streams live via SSE until job is terminal
 ```
-
-Works for both shell and Docker workloads.
 
 ---
 
@@ -352,9 +354,9 @@ multiple network interfaces or when running inside a container.
 ```bash
 tcp nodes                                                # list nodes
 tcp topology [-f]                                        # cluster tree view; -f live
-tcp exec <node> <command> [--image <image>]              # run one-off job
+tcp exec <node> <command> --image <image>                # run one-off job
 tcp deploy <n> <command> <replicas> \
-    [--image <image>] [--constraint key=value]           # declare workload
+    --image <image> [--constraint key=value]             # declare workload
 tcp scale <n> <replicas>                                 # change replica count
 tcp undeploy <n>                                         # remove workload, cancels jobs
 tcp revoke <node>                                        # revoke node token
@@ -363,6 +365,8 @@ tcp jobs                                                 # raw job list (JSON)
 tcp logs <job_id> [-f]                                   # job output; -f stream live
 tcp events [-f]                                          # recent cluster events; -f stream live
 ```
+
+Note: `--image` is required on both `tcp exec` and `tcp deploy`.
 
 ---
 

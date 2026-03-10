@@ -156,7 +156,7 @@ def test_agent_jobs_returns_empty_when_no_work(client, registered):
 
 
 def test_agent_jobs_returns_pending_job(client, registered):
-    store.create_job("node1", "uptime")
+    store.create_job("node1", "uptime", image="alpine")
     r = client.get(
         "/agent/jobs/node1",
         headers={"X-Node-Token": registered},
@@ -168,7 +168,7 @@ def test_agent_jobs_returns_pending_job(client, registered):
 
 
 def test_agent_jobs_marks_job_running(client, registered):
-    jid = store.create_job("node1", "uptime")
+    store.create_job("node1", "uptime", image="alpine")
     client.get("/agent/jobs/node1", headers={"X-Node-Token": registered})
     jobs = store.list_jobs()
     assert jobs[0]["status"] == store.JobStatus.RUNNING
@@ -187,7 +187,7 @@ def test_agent_jobs_rejected_with_wrong_token(client):
 # ---------------------------------------------------------------------------
 
 def test_agent_heartbeat_renews_lease(client, registered):
-    jid = store.create_job("node1", "sleep 100")
+    jid = store.create_job("node1", "sleep 100", image="alpine")
     store.start_job(jid)
 
     r = client.post(
@@ -200,7 +200,7 @@ def test_agent_heartbeat_renews_lease(client, registered):
 
 
 def test_agent_heartbeat_rejected_with_wrong_token(client, registered):
-    jid = store.create_job("node1", "sleep 100")
+    jid = store.create_job("node1", "sleep 100", image="alpine")
     store.start_job(jid)
 
     r = client.post(
@@ -216,7 +216,7 @@ def test_agent_heartbeat_rejected_with_wrong_token(client, registered):
 # ---------------------------------------------------------------------------
 
 def test_agent_result_records_success(client, registered):
-    jid = store.create_job("node1", "uptime")
+    jid = store.create_job("node1", "uptime", image="alpine")
     store.start_job(jid)
 
     r = client.post(
@@ -229,7 +229,7 @@ def test_agent_result_records_success(client, registered):
 
 
 def test_agent_result_rejected_with_wrong_token(client, registered):
-    jid = store.create_job("node1", "uptime")
+    jid = store.create_job("node1", "uptime", image="alpine")
     store.start_job(jid)
 
     r = client.post(
@@ -245,7 +245,7 @@ def test_agent_result_rejected_with_wrong_token(client, registered):
 # ---------------------------------------------------------------------------
 
 def test_agent_log_stores_line(client, registered):
-    jid = store.create_job("node1", "uptime")
+    jid = store.create_job("node1", "uptime", image="alpine")
 
     r = client.post(
         "/agent/log",
@@ -259,7 +259,7 @@ def test_agent_log_stores_line(client, registered):
 
 
 def test_agent_log_rejected_with_wrong_token(client, registered):
-    jid = store.create_job("node1", "uptime")
+    jid = store.create_job("node1", "uptime", image="alpine")
 
     r = client.post(
         "/agent/log",
@@ -274,7 +274,7 @@ def test_agent_log_rejected_with_wrong_token(client, registered):
 # ---------------------------------------------------------------------------
 
 def test_agent_cancel_returns_queued_job(client, registered):
-    jid = store.create_job("node1", "sleep 100")
+    jid = store.create_job("node1", "sleep 100", image="alpine")
     store.start_job(jid)
     store.enqueue_cancel(jid, "node1")
 
@@ -287,7 +287,7 @@ def test_agent_cancel_returns_queued_job(client, registered):
 
 
 def test_agent_cancel_is_destructive_read(client, registered):
-    jid = store.create_job("node1", "sleep 100")
+    jid = store.create_job("node1", "sleep 100", image="alpine")
     store.start_job(jid)
     store.enqueue_cancel(jid, "node1")
 
@@ -356,20 +356,40 @@ def test_revoke_node_rejected_without_operator_token(client, registered):
 def test_post_job_creates_job(client, registered):
     r = client.post(
         "/jobs",
-        json={"node": "node1", "command": "uptime"},
+        json={"node": "node1", "command": "uptime", "image": "alpine"},
         headers=_op(),
     )
     assert r.status_code == 200
     assert "job" in r.json()
 
 
+def test_post_job_rejected_without_image(client, registered):
+    """All jobs must specify a Docker image — missing image returns 422."""
+    r = client.post(
+        "/jobs",
+        json={"node": "node1", "command": "uptime"},
+        headers=_op(),
+    )
+    assert r.status_code == 422
+
+
+def test_post_job_rejected_with_empty_image(client, registered):
+    """An empty image string is equivalent to no image and must be rejected."""
+    r = client.post(
+        "/jobs",
+        json={"node": "node1", "command": "uptime", "image": ""},
+        headers=_op(),
+    )
+    assert r.status_code == 422
+
+
 def test_post_job_rejected_without_operator_token(client, registered):
-    r = client.post("/jobs", json={"node": "node1", "command": "uptime"})
+    r = client.post("/jobs", json={"node": "node1", "command": "uptime", "image": "alpine"})
     assert r.status_code == 401
 
 
 def test_get_jobs_returns_list(client, registered):
-    store.create_job("node1", "uptime")
+    store.create_job("node1", "uptime", image="alpine")
     r = client.get("/jobs", headers=_op())
     assert r.status_code == 200
     jobs = r.json()
@@ -393,7 +413,7 @@ def test_get_jobs_rejected_without_operator_token(client):
 # ---------------------------------------------------------------------------
 
 def test_get_job_logs(client, registered):
-    jid = store.create_job("node1", "uptime")
+    jid = store.create_job("node1", "uptime", image="alpine")
     store.store_log(jid, "line one")
     store.store_log(jid, "line two")
 
@@ -404,14 +424,14 @@ def test_get_job_logs(client, registered):
 
 
 def test_get_job_logs_empty(client):
-    jid = store.create_job("node1", "uptime")
+    jid = store.create_job("node1", "uptime", image="alpine")
     r = client.get(f"/jobs/{jid}/logs", headers=_op())
     assert r.status_code == 200
     assert r.json() == []
 
 
 def test_get_job_logs_rejected_without_operator_token(client):
-    jid = store.create_job("node1", "uptime")
+    jid = store.create_job("node1", "uptime", image="alpine")
     r = client.get(f"/jobs/{jid}/logs")
     assert r.status_code == 401
 
@@ -423,23 +443,43 @@ def test_get_job_logs_rejected_without_operator_token(client):
 def test_post_workload_creates_workload(client):
     r = client.post(
         "/workloads",
-        json={"name": "workers", "command": "uptime", "replicas": 3},
+        json={"name": "workers", "command": "uptime", "replicas": 3, "image": "alpine"},
         headers=_op(),
     )
     assert r.status_code == 200
     assert r.json()["ok"] is True
 
 
-def test_post_workload_rejected_without_operator_token(client):
+def test_post_workload_rejected_without_image(client):
+    """Workloads must specify a Docker image — missing image returns 422."""
     r = client.post(
         "/workloads",
         json={"name": "workers", "command": "uptime", "replicas": 3},
+        headers=_op(),
+    )
+    assert r.status_code == 422
+
+
+def test_post_workload_rejected_with_empty_image(client):
+    """An empty image string is equivalent to no image and must be rejected."""
+    r = client.post(
+        "/workloads",
+        json={"name": "workers", "command": "uptime", "replicas": 3, "image": ""},
+        headers=_op(),
+    )
+    assert r.status_code == 422
+
+
+def test_post_workload_rejected_without_operator_token(client):
+    r = client.post(
+        "/workloads",
+        json={"name": "workers", "command": "uptime", "replicas": 3, "image": "alpine"},
     )
     assert r.status_code == 401
 
 
 def test_get_workloads_returns_list(client):
-    store.create_workload("workers", "uptime", 3)
+    store.create_workload("workers", "uptime", 3, image="alpine")
     r = client.get("/workloads", headers=_op())
     assert r.status_code == 200
     workloads = r.json()
@@ -478,7 +518,7 @@ def test_post_workload_with_image_and_constraints(client):
 # ---------------------------------------------------------------------------
 
 def test_scale_workload(client, registered):
-    store.create_workload("workers", "uptime", 3)
+    store.create_workload("workers", "uptime", 3, image="alpine")
 
     r = client.post("/workloads/workers/scale", json={"replicas": 1}, headers=_op())
     assert r.status_code == 200
@@ -493,13 +533,13 @@ def test_scale_workload_not_found(client):
 
 
 def test_scale_workload_rejected_without_operator_token(client):
-    store.create_workload("workers", "uptime", 3)
+    store.create_workload("workers", "uptime", 3, image="alpine")
     r = client.post("/workloads/workers/scale", json={"replicas": 1})
     assert r.status_code == 401
 
 
 def test_scale_down_cancels_excess_jobs(client, registered):
-    store.create_workload("workers", "uptime", 3)
+    store.create_workload("workers", "uptime", 3, image="alpine")
     api.reconcile_once()
 
     r = client.post("/workloads/workers/scale", json={"replicas": 1}, headers=_op())
@@ -511,7 +551,7 @@ def test_scale_down_cancels_excess_jobs(client, registered):
 # ---------------------------------------------------------------------------
 
 def test_delete_workload(client, registered):
-    store.create_workload("workers", "uptime", 2)
+    store.create_workload("workers", "uptime", 2, image="alpine")
     api.reconcile_once()
 
     r = client.delete("/workloads/workers", headers=_op())
@@ -524,7 +564,7 @@ def test_delete_workload(client, registered):
 
 
 def test_delete_workload_rejected_without_operator_token(client, registered):
-    store.create_workload("workers", "uptime", 2)
+    store.create_workload("workers", "uptime", 2, image="alpine")
     r = client.delete("/workloads/workers")
     assert r.status_code == 401
 

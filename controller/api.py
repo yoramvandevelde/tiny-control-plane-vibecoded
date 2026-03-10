@@ -86,6 +86,19 @@ def require_operator_auth(x_operator_token: str | None):
         raise HTTPException(status_code=401, detail="invalid or missing operator token")
 
 
+def require_image(image: str | None):
+    """
+    Raise HTTP 422 if no Docker image was provided.
+    All jobs and workloads must run inside a container — bare host
+    execution is not permitted.
+    """
+    if not image:
+        raise HTTPException(
+            status_code=422,
+            detail="image is required: all jobs must run inside a Docker container",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Scheduler
 # ---------------------------------------------------------------------------
@@ -302,9 +315,13 @@ def revoke(node_id: str, x_operator_token: str | None = Header(None)):
 
 @app.post("/jobs")
 def job(data: dict, x_operator_token: str | None = Header(None)):
-    """Submit a one-shot job directly to a specific node."""
+    """
+    Submit a one-shot job directly to a specific node.
+    A Docker image is required — bare host execution is not permitted.
+    """
     require_operator_auth(x_operator_token)
-    jid = create_job(data["node"], data["command"], image=data.get("image"))
+    require_image(data.get("image"))
+    jid = create_job(data["node"], data["command"], image=data["image"])
     return {"job": jid}
 
 
@@ -353,13 +370,18 @@ async def job_logs_stream(job_id: str, x_operator_token: str | None = Header(Non
 
 @app.post("/workloads")
 def workload(data: dict, x_operator_token: str | None = Header(None)):
-    """Create or replace a workload. The reconciler will schedule jobs to meet the replica count."""
+    """
+    Create or replace a workload. A Docker image is required — bare host
+    execution is not permitted. The reconciler will schedule jobs to meet
+    the replica count.
+    """
     require_operator_auth(x_operator_token)
+    require_image(data.get("image"))
     create_workload(
         data["name"],
         data["command"],
         data["replicas"],
-        image=data.get("image"),
+        image=data["image"],
         constraints=data.get("constraints"),
         resources=data.get("resources"),
     )

@@ -3,7 +3,6 @@ import os
 import pathlib
 import queue
 import shlex
-import signal
 import socket
 import subprocess
 import sys
@@ -108,6 +107,7 @@ def _save_token(token: str):
     p.write_text(token)
     p.chmod(0o600)
 
+
 # ---------------------------------------------------------------------------
 # Shared state
 # ---------------------------------------------------------------------------
@@ -116,18 +116,18 @@ def _save_token(token: str):
 _results: queue.Queue = queue.Queue()
 
 # Job IDs currently executing — used to send heartbeats.
-_running_jobs: set     = set()
-_running_lock          = threading.Lock()
+_running_jobs: set    = set()
+_running_lock         = threading.Lock()
 
-# Per-job process handles for cancellation.
-# Values are ("shell", Popen) or ("docker", container_name).
-_processes:      dict  = {}
-_processes_lock        = threading.Lock()
+# Per-job Docker container names for cancellation.
+# All jobs run in Docker; values are container name strings.
+_processes:     dict  = {}
+_processes_lock       = threading.Lock()
 
 # Buffered log lines that could not be shipped due to controller unavailability.
 # Entries are (job_id, line). Flushed at the start of each poll iteration.
-_log_buffer:      list = []
-_log_buffer_lock        = threading.Lock()
+_log_buffer:     list = []
+_log_buffer_lock      = threading.Lock()
 
 # Set after successful registration.
 _node_token: str | None = None
@@ -258,43 +258,25 @@ def run_docker(image: str, command: str, container_name: str = "") -> subprocess
 
 def execute(job: dict) -> tuple:
     """
-    Execute a job and return (status, output).
+    Execute a job inside a Docker container and return (status, output).
 
-    Docker jobs: run in an isolated container with no network access.
-    Shell jobs:  run directly in a subprocess on the host.
-
-    In both cases the process handle is stored in _processes before
-    blocking on output, so kill_job can reach it while the job is running.
+    All jobs run in an isolated container with no network access.
+    The container name is registered in _processes before blocking on output
+    so kill_job can reach it while the job is running.
     """
-    job_id = job["job"]
+    job_id         = job["job"]
+    container_name = f"tcp-{job_id[:16]}"
     try:
-        if job.get("image"):
-            container_name = f"tcp-{job_id[:16]}"
-            proc = run_docker(job["image"], job["command"], container_name=container_name)
+        proc = run_docker(job["image"], job["command"], container_name=container_name)
 
-            # Register before waiting so kill_job can find the container.
-            with _processes_lock:
-                _processes[job_id] = ("docker", container_name)
+        # Register before waiting so kill_job can find the container.
+        with _processes_lock:
+            _processes[job_id] = container_name
 
-            out, _ = proc.communicate()
-            if proc.returncode != 0:
-                return STATUS_FAILED, out.decode()
-            return STATUS_SUCCEEDED, out.decode()
-
-        else:
-            proc = subprocess.Popen(
-                job["command"],
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
-            with _processes_lock:
-                _processes[job_id] = ("shell", proc)
-
-            out, _ = proc.communicate()
-            if proc.returncode != 0:
-                return STATUS_FAILED, out.decode()
-            return STATUS_SUCCEEDED, out.decode()
+        out, _ = proc.communicate()
+        if proc.returncode != 0:
+            return STATUS_FAILED, out.decode()
+        return STATUS_SUCCEEDED, out.decode()
 
     except Exception as e:
         return STATUS_FAILED, str(e)
@@ -302,35 +284,20 @@ def execute(job: dict) -> tuple:
 
 def kill_job(job_id: str):
     """
-    Terminate a running job.
-    Shell jobs receive SIGTERM, then SIGKILL after 5 seconds if still alive.
-    Docker jobs are stopped with 'docker stop', which sends SIGTERM and waits
-    for the container to exit before force-killing it.
+    Terminate a running Docker container by its deterministic name.
+    'docker stop' sends SIGTERM to the container process and waits for it
+    to exit before force-killing it.
     """
     with _processes_lock:
-        entry = _processes.pop(job_id, None)
+        container_name = _processes.pop(job_id, None)
 
-    if entry is None:
+    if container_name is None:
         return
 
-    kind, handle = entry
-
-    if kind == "shell":
-        try:
-            handle.terminate()
-            try:
-                handle.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                handle.kill()
-        except Exception as e:
-            print(f"[{node}] failed to kill shell job {job_id}: {e}")
-
-    elif kind == "docker":
-        if handle:
-            try:
-                subprocess.run(["docker", "stop", handle], timeout=10)
-            except Exception as e:
-                print(f"[{node}] failed to stop container {handle}: {e}")
+    try:
+        subprocess.run(["docker", "stop", container_name], timeout=10)
+    except Exception as e:
+        print(f"[{node}] failed to stop container {container_name}: {e}")
 
     print(f"[{node}] cancelled job {job_id}")
 
@@ -503,13 +470,9 @@ def loop():
             data = r.json()
             if "job" in data:
                 job_id  = data["job"]
-                image   = data.get("image")
+                image   = data["image"]
                 command = data.get("command")
-                if image:
-                    print(f"[{node}] starting job {job_id}: docker run {image} {command}")
-                else:
-                    print(f"[{node}] starting job {job_id}: shell: {command}")
-
+                print(f"[{node}] starting job {job_id}: docker run {image} {command}")
                 t = threading.Thread(target=run_job_thread, args=(data,), daemon=True)
                 t.start()
 

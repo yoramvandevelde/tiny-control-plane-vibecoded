@@ -241,12 +241,23 @@ def topology(
 
 @app.command(name="exec")
 def exec_cmd(
-    node:    str            = typer.Argument(..., help="Node ID to run the job on."),
-    command: str            = typer.Argument(..., help="Command to execute."),
-    image:   Optional[str]  = typer.Option(None, help="Docker image to run the command in. Omit for a shell job."),
+    node:    str = typer.Argument(..., help="Node ID to run the job on."),
+    command: str = typer.Argument(..., help="Command to execute."),
+    image:   str = typer.Option(...,  help="Docker image to run the command in."),
 ):
-    """Submit a one-shot job to a specific node."""
-    r = httpx.post(f"{API}/jobs", json={"node": node, "command": command, "image": image}, headers=_operator_headers())
+    """
+    Submit a one-shot job to a specific node.
+
+    All jobs run inside a Docker container. --image is required.
+
+    Example:
+        tcp exec node1 'echo hello' --image alpine
+    """
+    r = httpx.post(
+        f"{API}/jobs",
+        json={"node": node, "command": command, "image": image},
+        headers=_operator_headers(),
+    )
     console.print(r.json())
 
 
@@ -313,11 +324,13 @@ def deploy(
     name:       str            = typer.Argument(..., help="Unique name for the workload."),
     command:    str            = typer.Argument(..., help="Command each replica will run."),
     replicas:   int            = typer.Argument(..., help="Number of replicas to maintain."),
-    image:      Optional[str]  = typer.Option(None,  help="Docker image to run the command in. Omit for shell jobs."),
+    image:      str            = typer.Option(...,   help="Docker image to run the command in."),
     constraint: Optional[list[str]] = typer.Option(None, help="Node label constraint in key=value format. Repeatable."),
 ):
     """
     Deploy a workload — the reconciler will schedule and maintain the requested number of replicas.
+
+    All replicas run inside Docker containers. --image is required.
 
     Example:
         tcp deploy workers 'python worker.py' 4 --image python:3.12 --constraint region=eu
