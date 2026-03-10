@@ -355,7 +355,7 @@ def remove_workload(name: str):
     Replicas are zeroed first so the reconciler cannot schedule new jobs
     in the window between cancellation and deletion.
     """
-    update_workload_replicas(name, 0)
+    update_workload_replicas(name, 0, silent=True)
     excess = get_excess_workload_jobs(name, 0)
     for job_id, node_id in excess:
         cancel_job(job_id, node_id)

@@ -421,14 +421,15 @@ def create_workload(
     record_event("workload.created", f"workload {name} created replicas={replicas}")
 
 
-def update_workload_replicas(name: str, replicas: int) -> bool:
-    """Update the replica count for a workload. Returns False if not found."""
+def update_workload_replicas(name: str, replicas: int, silent: bool = False) -> bool:
+    """Update the replica count for a workload. Returns False if not found.
+    Pass silent=True to suppress the event (used internally during undeploy)."""
     with _db_lock:
         cur = get_db().execute(
             "UPDATE workloads SET replicas=? WHERE name=?", (replicas, name)
         )
         get_db().commit()
-    if cur.rowcount > 0:
+    if cur.rowcount > 0 and not silent:
         record_event("workload.scaled", f"workload {name} scaled to replicas={replicas}")
     return cur.rowcount > 0
 
