@@ -20,6 +20,7 @@ from controller.store import (
     get_events_since,
     get_excess_workload_jobs,
     get_logs,
+    get_node_resource_usage,
     get_pending_job,
     init_db,
     list_events,
@@ -109,12 +110,19 @@ def pick_node(nodes: dict, constraints: dict, resources: dict) -> str | None:
 
     1. Exclude unhealthy nodes and nodes not seen within NODE_STALE_SECONDS.
     2. Exclude nodes whose labels do not satisfy the workload constraints.
-    3. Score by (active job count, CPU usage) — lowest score wins.
-    4. Shuffle before sorting so ties are broken randomly.
+    3. Exclude nodes that lack sufficient CPU or memory headroom for the job's
+       resource requirements (resources["cpu"] and resources["mem"]).
+    4. Score by (active job count, CPU usage) — lowest score wins.
+    5. Shuffle before sorting so ties are broken randomly.
 
     Returns None if no eligible node is available.
     """
-    now        = time.time()
+    req_cpu = resources.get("cpu", 0)
+    req_mem = resources.get("mem", 0)
+    now     = time.time()
+
+    node_usage = get_node_resource_usage() if (req_cpu or req_mem) else {}
+
     candidates = []
 
     for node_id, info in nodes.items():
@@ -127,6 +135,15 @@ def pick_node(nodes: dict, constraints: dict, resources: dict) -> str | None:
         labels = info.get("labels", {})
         if not all(labels.get(k) == v for k, v in constraints.items()):
             continue
+
+        if req_cpu or req_mem:
+            total_cpu = info.get("total_cpu", 0)
+            total_mem = info.get("total_mem_mb", 0)
+            usage     = node_usage.get(node_id, {"used_cpu": 0, "used_mem": 0})
+            if total_cpu - usage["used_cpu"] < req_cpu:
+                continue
+            if total_mem - usage["used_mem"] < req_mem:
+                continue
 
         job_count = count_active_node_jobs(node_id)
         cpu_used  = info.get("state", {}).get("cpu", 0)
@@ -170,8 +187,11 @@ def reconcile_once():
         running = count_active_workload_jobs(w["name"])
         missing = w["replicas"] - running
 
+        req_cpu = w.get("req_cpu", 0)
+        req_mem = w.get("req_mem_mb", 0)
+
         for _ in range(missing):
-            node_id = pick_node(nodes, w.get("constraints", {}), w.get("resources", {}))
+            node_id = pick_node(nodes, w.get("constraints", {}), {"cpu": req_cpu, "mem": req_mem})
             if node_id is None:
                 break
             create_job(
@@ -179,6 +199,8 @@ def reconcile_once():
                 w["command"],
                 image=w.get("image"),
                 workload_name=w["name"],
+                req_cpu=req_cpu,
+                req_mem_mb=req_mem,
             )
 
 

@@ -16,7 +16,7 @@ import psutil
 # Version
 # ---------------------------------------------------------------------------
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -188,6 +188,9 @@ def _do_register() -> str:
     address = _resolve_address()
     print(f"[{node}] registering with address {address}")
 
+    total_cpu = psutil.cpu_count(logical=True)
+    total_mem = int(psutil.virtual_memory().total / (1024 * 1024))
+
     r = httpx.post(
         f"{CONTROLLER}/register",
         json={
@@ -195,6 +198,8 @@ def _do_register() -> str:
             "address": address,
             "labels":  parse_labels(args.label),
             "version": VERSION,
+            "total_cpu": total_cpu,
+            "total_mem_mb": total_mem,
         },
         headers={"X-Bootstrap-Token": bootstrap_token},
     )

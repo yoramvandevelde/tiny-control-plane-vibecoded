@@ -43,25 +43,19 @@ def init_db(path: str = None):
 
     db.execute("""
         CREATE TABLE IF NOT EXISTS nodes (
-            id         TEXT PRIMARY KEY,
-            address    TEXT,
-            labels     TEXT,
-            capacity   TEXT,
-            healthy    INTEGER,
-            last_seen  REAL,
-            state_json TEXT,
-            token      TEXT,
-            version    TEXT
+            id           TEXT PRIMARY KEY,
+            address      TEXT,
+            labels       TEXT,
+            capacity     TEXT,
+            healthy      INTEGER,
+            last_seen    REAL,
+            state_json   TEXT,
+            token        TEXT,
+            version      TEXT,
+            total_cpu    INTEGER DEFAULT 1,
+            total_mem_mb INTEGER DEFAULT 512
         )
     """)
-
-    # Migrate existing databases that lack the version column.
-    existing_cols = {
-        row[1]
-        for row in db.execute("PRAGMA table_info(nodes)").fetchall()
-    }
-    if "version" not in existing_cols:
-        db.execute("ALTER TABLE nodes ADD COLUMN version TEXT")
 
     db.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
@@ -76,7 +70,9 @@ def init_db(path: str = None):
             result        TEXT,
             created       REAL,
             updated       REAL,
-            lease_expires REAL
+            lease_expires REAL,
+            req_cpu     INTEGER DEFAULT 0,
+            req_mem_mb  INTEGER DEFAULT 0
         )
     """)
 
@@ -87,7 +83,9 @@ def init_db(path: str = None):
             image       TEXT,
             replicas    INTEGER,
             constraints TEXT,
-            resources   TEXT
+            resources   TEXT,
+            req_cpu     INTEGER DEFAULT 0,
+            req_mem_mb  INTEGER DEFAULT 0
         )
     """)
 
@@ -121,6 +119,16 @@ def init_db(path: str = None):
 
     db.commit()
 
+    # Migrations: add columns that may be missing from older schemas.
+    existing = {row[1] for row in db.execute("PRAGMA table_info(nodes)").fetchall()}
+    if "version" not in existing:
+        db.execute("ALTER TABLE nodes ADD COLUMN version TEXT")
+    if "total_cpu" not in existing:
+        db.execute("ALTER TABLE nodes ADD COLUMN total_cpu INTEGER DEFAULT 1")
+    if "total_mem_mb" not in existing:
+        db.execute("ALTER TABLE nodes ADD COLUMN total_mem_mb INTEGER DEFAULT 512")
+    db.commit()
+
 
 # ---------------------------------------------------------------------------
 # Job status constants
@@ -149,21 +157,32 @@ def register_node(node_id: str, address: str, labels: dict = None, capacity: dic
     """
     Register or re-register a node. Generates a fresh per-node token and
     returns it — the agent must include this token in all subsequent requests.
+    Capacity should be a dict with optional keys "cpu" (int) and "mem" (int, MiB).
     """
     token = str(uuid.uuid4())
+    cap = capacity or {}
+    total_cpu    = cap.get("cpu", 1)
+    total_mem_mb = cap.get("mem", 512)
     with _db_lock:
         get_db().execute(
-            "INSERT OR REPLACE INTO nodes VALUES (?,?,?,?,?,?,?,?,?)",
+            """
+            INSERT OR REPLACE INTO nodes
+                (id, address, labels, capacity, healthy, last_seen, state_json,
+                 token, version, total_cpu, total_mem_mb)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            """,
             (
                 node_id,
                 address,
                 json.dumps(labels or {}),
-                json.dumps(capacity or {}),
+                json.dumps(cap),
                 1,
                 time.time(),
                 None,
                 token,
                 version,
+                total_cpu,
+                total_mem_mb,
             ),
         )
         get_db().commit()
@@ -220,18 +239,22 @@ def update_state(node_id: str, state: dict):
 def list_nodes() -> dict:
     """Return all registered nodes keyed by node ID."""
     rows = get_db().execute(
-        "SELECT id, address, labels, capacity, healthy, state_json, last_seen, version FROM nodes"
+        """SELECT id, address, labels, capacity, healthy, state_json, last_seen,
+                  version, total_cpu, total_mem_mb
+           FROM nodes"""
     ).fetchall()
 
     return {
         r[0]: {
-            "address":   r[1],
-            "labels":    json.loads(r[2]) if r[2] else {},
-            "capacity":  json.loads(r[3]) if r[3] else {},
-            "healthy":   bool(r[4]),
-            "state":     json.loads(r[5]) if r[5] else {},
-            "last_seen": r[6],
-            "version":   r[7],
+            "address":      r[1],
+            "labels":       json.loads(r[2]) if r[2] else {},
+            "capacity":     json.loads(r[3]) if r[3] else {},
+            "healthy":      bool(r[4]),
+            "state":        json.loads(r[5]) if r[5] else {},
+            "last_seen":    r[6],
+            "version":      r[7],
+            "total_cpu":    r[8] if r[8] is not None else 1,
+            "total_mem_mb": r[9] if r[9] is not None else 512,
         }
         for r in rows
     }
@@ -246,6 +269,8 @@ def create_job(
     command:       str,
     image:         str = None,
     workload_name: str = None,
+    req_cpu:       int = 0,
+    req_mem_mb:    int = 0,
 ) -> str:
     """Create a new job in PENDING state and return its UUID."""
     jid = str(uuid.uuid4())
@@ -254,8 +279,9 @@ def create_job(
             """
             INSERT INTO jobs (
                 id, node_id, command, image, workload_name,
-                constraints, resources, status, result, created, updated, lease_expires
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                constraints, resources, status, result, created, updated, lease_expires,
+                req_cpu, req_mem_mb
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 jid,
@@ -270,6 +296,8 @@ def create_job(
                 time.time(),
                 time.time(),
                 None,
+                req_cpu,
+                req_mem_mb,
             ),
         )
         get_db().commit()
@@ -380,7 +408,9 @@ def expire_lost_jobs():
 def list_jobs() -> list:
     """Return all jobs."""
     rows = get_db().execute(
-        "SELECT id, node_id, command, image, workload_name, status, result, created, updated FROM jobs"
+        """SELECT id, node_id, command, image, workload_name, status, result,
+                  created, updated, req_cpu, req_mem_mb
+           FROM jobs"""
     ).fetchall()
 
     return [
@@ -394,9 +424,28 @@ def list_jobs() -> list:
             "result":        r[6],
             "created":       r[7],
             "updated":       r[8],
+            "req_cpu":       r[9],
+            "req_mem_mb":    r[10],
         }
         for r in rows
     ]
+
+
+def get_node_resource_usage() -> dict:
+    """
+    Return a dict of node_id -> {used_cpu, used_mem} summing req_cpu and
+    req_mem_mb across all PENDING and RUNNING jobs. Used by the scheduler to
+    determine available headroom before placing a new job.
+    """
+    placeholders = ",".join("?" * len(JobStatus.ACTIVE))
+    rows = get_db().execute(
+        f"""SELECT node_id, SUM(req_cpu), SUM(req_mem_mb)
+            FROM jobs
+            WHERE status IN ({placeholders})
+            GROUP BY node_id""",
+        tuple(JobStatus.ACTIVE),
+    ).fetchall()
+    return {r[0]: {"used_cpu": r[1] or 0, "used_mem": r[2] or 0} for r in rows}
 
 
 def count_active_node_jobs(node_id: str) -> int:
@@ -454,12 +503,16 @@ def create_workload(
     image:       str  = None,
     constraints: dict = None,
     resources:   dict = None,
+    req_cpu:     int  = 0,
+    req_mem_mb:  int  = 0,
 ):
     """Create or replace a workload definition."""
     with _db_lock:
         get_db().execute(
-            "INSERT OR REPLACE INTO workloads VALUES (?,?,?,?,?,?)",
-            (name, command, image, replicas, json.dumps(constraints or {}), json.dumps(resources or {})),
+            """INSERT OR REPLACE INTO workloads
+               (name, command, image, replicas, constraints, resources, req_cpu, req_mem_mb)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (name, command, image, replicas, json.dumps(constraints or {}), json.dumps(resources or {}), req_cpu, req_mem_mb),
         )
         get_db().commit()
     record_event("workload.created", f"workload {name} created replicas={replicas}")
@@ -489,7 +542,7 @@ def delete_workload(name: str):
 def list_workloads() -> list:
     """Return all workload definitions."""
     rows = get_db().execute(
-        "SELECT name, command, image, replicas, constraints, resources FROM workloads"
+        "SELECT name, command, image, replicas, constraints, resources, req_cpu, req_mem_mb FROM workloads"
     ).fetchall()
 
     return [
@@ -500,6 +553,8 @@ def list_workloads() -> list:
             "replicas":    r[3],
             "constraints": json.loads(r[4]) if r[4] else {},
             "resources":   json.loads(r[5]) if r[5] else {},
+            "req_cpu":     r[6] or 0,
+            "req_mem_mb":  r[7] or 0,
         }
         for r in rows
     ]
