@@ -43,6 +43,12 @@ from controller.store import (
 # A node is considered stale if it has not reported state within this window.
 NODE_STALE_SECONDS = 30
 
+# Lease expiry is suppressed for this many seconds after controller startup,
+# so a brief restart does not incorrectly mark running jobs as lost.
+STARTUP_GRACE_SECONDS = 60
+
+_startup_time: float = 0.0
+
 
 # ---------------------------------------------------------------------------
 # Auth helpers
@@ -118,10 +124,13 @@ def reconcile_once():
     Single reconciliation pass:
 
     1. Expire leases so lost jobs do not count toward replica targets.
+       Skipped during the startup grace period to avoid marking jobs lost
+       due to a brief controller restart.
     2. For each workload, schedule new jobs on available nodes until the
        active job count matches the desired replica count.
     """
-    expire_lost_jobs()
+    if time.time() - _startup_time > STARTUP_GRACE_SECONDS:
+        expire_lost_jobs()
 
     workloads = list_workloads()
     nodes     = list_nodes()
@@ -158,6 +167,8 @@ async def reconcile_loop():
 
 @asynccontextmanager
 async def lifespan(app):
+    global _startup_time
+    _startup_time = time.time()
     init_db()
     asyncio.create_task(reconcile_loop())
     yield

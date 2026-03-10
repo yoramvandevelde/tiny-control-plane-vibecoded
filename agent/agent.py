@@ -74,6 +74,11 @@ _running_lock          = threading.Lock()
 _processes:      dict  = {}
 _processes_lock        = threading.Lock()
 
+# Buffered log lines that could not be shipped due to controller unavailability.
+# Entries are (job_id, line). Flushed at the start of each poll iteration.
+_log_buffer:      list = []
+_log_buffer_lock        = threading.Lock()
+
 # Set after successful registration.
 _node_token: str | None = None
 
@@ -308,7 +313,12 @@ def run_job_thread(job: dict):
 # ---------------------------------------------------------------------------
 
 def send_logs(job_id: str, output: str):
-    """Post each line of output to the controller's log endpoint."""
+    """
+    Post each line of output to the controller's log endpoint.
+    Lines that cannot be shipped (controller unreachable) are added to
+    the in-memory buffer and retried by flush_log_buffer on the next
+    poll iteration.
+    """
     for line in output.splitlines():
         try:
             httpx.post(
@@ -318,7 +328,39 @@ def send_logs(job_id: str, output: str):
                 timeout=1,
             )
         except Exception:
-            pass
+            with _log_buffer_lock:
+                _log_buffer.append((job_id, line))
+
+
+def flush_log_buffer():
+    """
+    Attempt to ship any log lines that failed to send in a previous iteration.
+    Lines are retried in order. On the first failure the remainder are kept
+    buffered and the flush stops — preserving line order and avoiding a
+    flood of requests against an unavailable controller.
+    """
+    with _log_buffer_lock:
+        if not _log_buffer:
+            return
+        pending = list(_log_buffer)
+
+    shipped = 0
+    for job_id, line in pending:
+        try:
+            httpx.post(
+                f"{CONTROLLER}/agent/log",
+                json={"job": job_id, "line": line, "node": node},
+                headers=_headers(),
+                timeout=1,
+            )
+            shipped += 1
+        except Exception:
+            break
+
+    if shipped:
+        with _log_buffer_lock:
+            del _log_buffer[:shipped]
+        print(f"[{node}] flushed {shipped} buffered log line(s)")
 
 
 def send_heartbeats():
@@ -346,6 +388,7 @@ def loop():
     """
     Poll the controller in a tight loop (1 second sleep):
 
+    0. Flush any log lines buffered during a previous controller outage.
     1. Post node state. Re-register on 401 if token was loaded from file; exit on explicit revocation.
     2. Send heartbeats for running jobs on the configured interval.
     3. Check for cancellation requests and kill matching jobs.
@@ -357,6 +400,9 @@ def loop():
 
     while True:
         try:
+            # 0. Flush any log lines buffered during a previous controller outage
+            flush_log_buffer()
+
             # 1. Report state
             r = httpx.post(f"{CONTROLLER}/state", json=collect_state(), headers=_headers())
             if r.status_code == 401:
