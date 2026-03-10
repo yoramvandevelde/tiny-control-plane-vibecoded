@@ -312,6 +312,17 @@ def mark_lost(job_id: str):
     record_event("job.lost", f"job {job_id} marked lost")
 
 
+def mark_cancelled(job_id: str, node_id: str):
+    """Mark a job as LOST due to an explicit operator cancellation."""
+    with _db_lock:
+        get_db().execute(
+            "UPDATE jobs SET status=?, updated=? WHERE id=?",
+            (JobStatus.LOST, time.time(), job_id),
+        )
+        get_db().commit()
+    record_event("job.cancelled", f"job {job_id} cancelled on {node_id}")
+
+
 def expire_lost_jobs():
     """Mark all RUNNING jobs whose lease has expired as LOST."""
     now = time.time()

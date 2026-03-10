@@ -26,8 +26,10 @@ from controller.store import (
     list_jobs,
     list_nodes,
     list_workloads,
+    mark_cancelled,
     mark_lost,
     pop_cancel_jobs,
+    record_event,
     register_node,
     renew_lease,
     revoke_node,
@@ -106,8 +108,8 @@ def pick_node(nodes: dict, constraints: dict, resources: dict) -> str | None:
 # ---------------------------------------------------------------------------
 
 def cancel_job(job_id: str, node_id: str):
-    """Mark a job as LOST and enqueue a cancellation signal for its agent."""
-    mark_lost(job_id)
+    """Mark a job as LOST due to explicit operator action and enqueue a cancellation signal."""
+    mark_cancelled(job_id, node_id)
     enqueue_cancel(job_id, node_id)
 
 
@@ -357,6 +359,7 @@ def remove_workload(name: str):
     """
     update_workload_replicas(name, 0, silent=True)
     excess = get_excess_workload_jobs(name, 0)
+    record_event("workload.deleting", f"workload {name} deleting — cancelling {len(excess)} job(s)")
     for job_id, node_id in excess:
         cancel_job(job_id, node_id)
     delete_workload(name)

@@ -307,16 +307,18 @@ def events(
     Use --follow / -f to stream events in real time.
     """
     EVENT_COLOUR = {
-        "node.registered": "cyan",
-        "node.revoked":    "red",
+        "node.registered":  "cyan",
+        "node.revoked":     "red",
         "workload.created": "green",
         "workload.scaled":  "yellow",
+        "workload.deleting":"yellow",
         "workload.removed": "red",
-        "job.scheduled":   "dim",
-        "job.started":     "cyan",
-        "job.succeeded":   "green",
-        "job.failed":      "red",
-        "job.lost":        "magenta",
+        "job.scheduled":    "dim",
+        "job.started":      "cyan",
+        "job.succeeded":    "green",
+        "job.failed":       "red",
+        "job.cancelled":    "yellow",
+        "job.lost":         "magenta",
     }
 
     def _fmt_event(kind: str, message: str, ts: float = None) -> str:
