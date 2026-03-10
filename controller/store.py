@@ -38,6 +38,9 @@ def init_db(path: str = None):
 
     db = get_db()
 
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=NORMAL")
+
     db.execute("""
         CREATE TABLE IF NOT EXISTS nodes (
             id         TEXT PRIMARY KEY,
