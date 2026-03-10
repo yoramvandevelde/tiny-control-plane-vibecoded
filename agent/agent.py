@@ -413,6 +413,24 @@ def send_heartbeats():
             pass
 
 
+def ack_cancels(job_ids: list):
+    """
+    Acknowledge a list of cancel signals so the controller stops redelivering them.
+    Failures are silently swallowed — the controller will redeliver after the
+    timeout and the agent will ack again on the next successful poll.
+    """
+    for job_id in job_ids:
+        try:
+            httpx.post(
+                f"{CONTROLLER}/agent/cancel/ack",
+                json={"job": job_id, "node": node},
+                headers=_headers(),
+                timeout=2,
+            )
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
@@ -424,7 +442,7 @@ def loop():
     0. Flush any log lines buffered during a previous controller outage.
     1. Post node state. Re-register on 401 if token was loaded from file; exit on explicit revocation.
     2. Send heartbeats for running jobs on the configured interval.
-    3. Check for cancellation requests and kill matching jobs.
+    3. Check for cancellation requests, kill matching jobs, then ack the signals.
     4. Drain the result queue and post completed job results.
     5. Pick up one new pending job and start it in a background thread.
     """
@@ -456,9 +474,12 @@ def loop():
                     headers=_headers(),
                     timeout=2,
                 )
-                for job_id in r.json().get("cancel", []):
+                cancel_ids = r.json().get("cancel", [])
+                for job_id in cancel_ids:
                     print(f"[{node}] received cancel for job {job_id}")
                     kill_job(job_id)
+                if cancel_ids:
+                    ack_cancels(cancel_ids)
             except Exception:
                 pass
 
@@ -498,16 +519,3 @@ def loop():
 if __name__ == "__main__":
     register()
     loop()
-
-
-def _ack_cancel(controller, job_id, node_id, token):
-    import requests
-    try:
-        requests.post(
-            f"{controller}/agent/cancel/ack",
-            params={"job_id": job_id, "node_id": node_id},
-            headers={"X-Node-Token": token},
-            timeout=5,
-        )
-    except Exception:
-        pass

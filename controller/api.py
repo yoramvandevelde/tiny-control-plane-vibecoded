@@ -306,11 +306,28 @@ def agent_log(data: dict, x_node_token: str | None = Header(None)):
 @app.get("/agent/cancel/{node}")
 def agent_cancel(node: str, x_node_token: str | None = Header(None)):
     """
-    Return and clear all pending cancellations for a node.
-    The agent calls this on every poll cycle and kills the listed jobs.
+    Return all pending cancellations for a node.
+
+    Cancels are stamped with a delivery time but not removed, so they survive
+    controller restarts. The agent must call POST /agent/cancel/ack for each
+    job once the container has been stopped, at which point redelivery stops.
     """
     require_agent_auth(node, x_node_token)
     return {"cancel": get_pending_cancels(node)}
+
+
+@app.post("/agent/cancel/ack")
+def agent_cancel_ack(data: dict, x_node_token: str | None = Header(None)):
+    """
+    Acknowledge that a cancel signal has been acted on by the agent.
+
+    Once acknowledged, the cancel entry will no longer be redelivered.
+    The agent should call this after successfully stopping the container.
+    """
+    node_id = data["node"]
+    require_agent_auth(node_id, x_node_token)
+    ack_cancel(data["job"], node_id)
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
