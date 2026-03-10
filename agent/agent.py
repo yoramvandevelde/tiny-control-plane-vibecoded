@@ -1,5 +1,6 @@
 import argparse
 import os
+import pathlib
 import queue
 import shlex
 import signal
@@ -29,6 +30,33 @@ node = args.node_id
 
 STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED    = "failed"
+
+# ---------------------------------------------------------------------------
+# Token persistence
+# ---------------------------------------------------------------------------
+
+def _token_path() -> pathlib.Path:
+    """Return the path to the persisted node token file."""
+    d = pathlib.Path.home() / ".tcp"
+    d.mkdir(mode=0o700, exist_ok=True)
+    return d / f"node-{node}.token"
+
+
+def _load_token() -> str | None:
+    """Read the persisted node token from disk, or return None if absent/empty."""
+    p = _token_path()
+    try:
+        token = p.read_text().strip()
+        return token if token else None
+    except FileNotFoundError:
+        return None
+
+
+def _save_token(token: str):
+    """Write the node token to disk with restricted permissions."""
+    p = _token_path()
+    p.write_text(token)
+    p.chmod(0o600)
 
 # ---------------------------------------------------------------------------
 # Shared state
@@ -62,7 +90,11 @@ def _headers() -> dict:
 
 
 def _handle_revocation():
-    """Called when the controller rejects our token. Logs and exits cleanly."""
+    """Called when the controller rejects our token. Clears the token file, logs and exits."""
+    try:
+        _token_path().unlink(missing_ok=True)
+    except Exception:
+        pass
     print(f"[{node}] node token rejected by controller — this node has been revoked")
     print(f"[{node}] shutting down; restart the agent to re-register")
     sys.exit(1)
@@ -81,13 +113,12 @@ def parse_labels(label_args) -> dict:
     return labels
 
 
-def register():
+def _do_register() -> str:
     """
-    Register this node with the controller using the bootstrap token.
-    Stores the returned per-node token for use in subsequent requests.
-    Exits immediately if the bootstrap token is missing or rejected.
+    Perform registration with the controller using the bootstrap token.
+    Returns the issued node token. Exits immediately if the bootstrap
+    token is missing or rejected.
     """
-    global _node_token
     bootstrap_token = os.environ.get("TCP_BOOTSTRAP_TOKEN", "")
     if not bootstrap_token:
         print("[agent] TCP_BOOTSTRAP_TOKEN is not set, cannot register")
@@ -106,8 +137,27 @@ def register():
         print("[agent] registration rejected: invalid bootstrap token")
         sys.exit(1)
 
-    _node_token = r.json()["token"]
+    token = r.json()["token"]
+    _save_token(token)
     print(f"[agent] registered as {node}")
+    return token
+
+
+def register():
+    """
+    Set the node token before starting the poll loop.
+
+    If a token file exists from a previous run, use it and skip registration.
+    If the token is later rejected (401), fall back to re-registering.
+    If no token file exists, register now and persist the issued token.
+    """
+    global _node_token
+    saved = _load_token()
+    if saved:
+        _node_token = saved
+        print(f"[agent] resuming as {node} using saved token")
+    else:
+        _node_token = _do_register()
 
 
 # ---------------------------------------------------------------------------
@@ -296,12 +346,13 @@ def loop():
     """
     Poll the controller in a tight loop (1 second sleep):
 
-    1. Post node state. Exit on 401 (revocation).
+    1. Post node state. Re-register on 401 if token was loaded from file; exit on explicit revocation.
     2. Send heartbeats for running jobs on the configured interval.
     3. Check for cancellation requests and kill matching jobs.
     4. Drain the result queue and post completed job results.
     5. Pick up one new pending job and start it in a background thread.
     """
+    global _node_token
     last_heartbeat = 0.0
 
     while True:
@@ -309,7 +360,9 @@ def loop():
             # 1. Report state
             r = httpx.post(f"{CONTROLLER}/state", json=collect_state(), headers=_headers())
             if r.status_code == 401:
-                _handle_revocation()
+                print(f"[{node}] saved token rejected — re-registering")
+                _node_token = _do_register()
+                continue
 
             # 2. Heartbeats
             now = time.time()
