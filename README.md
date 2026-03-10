@@ -2,9 +2,9 @@
 
 Welcome to **Tiny Control Plane**, a small distributed systems playground written in Python.
 
-This project demonstrates the core concepts behind real world orchestrators Kubernetes, Mesos and the like. Instead of thousands of lines of Go, YAML, and existential dread we (Gemini, ChatGPT and Claude) built it with **Python, curiosity, and a healthy (read: minimal) amount of input from a human.**
+This project demonstrates the core concepts behind real world orchestrators like Kubernetes and Mesos. Instead of thousands of lines of Go, YAML, and existential dread we (Gemini, ChatGPT and Claude) built it with **Python, curiosity, and a healthy (read: minimal) amount of input from a human.**
 
-Yes, this entire mini‑orchestrator was vibe‑coded.
+Yes, this entire mini-orchestrator was vibe-coded.
 
 Which means:
 
@@ -28,7 +28,9 @@ Somehow, this still resulted in:
 * a CLI that tells you what is actually happening
 * scaling workloads up and down
 * per-node authentication and revocation
-
+* streaming logs via SSE
+* cluster event log with lifecycle instrumentation
+* topology view
 
 ---
 
@@ -85,6 +87,7 @@ Every job moves through a defined set of states:
 ```
 pending → running → succeeded
                   → failed
+                  → cancelled
                   → lost
 ```
 
@@ -92,7 +95,8 @@ pending → running → succeeded
 `running` — agent has claimed the job and is executing it.
 `succeeded` — completed with exit code 0.
 `failed` — completed with a non-zero exit code.
-`lost` — was running but the agent disappeared or the job was cancelled.
+`cancelled` — explicitly stopped by an operator action (scale-down or undeploy).
+`lost` — was running but the agent disappeared or its lease expired without renewal.
 
 Only `pending` and `running` jobs count as active. The reconciler uses this to determine how many new jobs to create for a workload.
 
@@ -113,6 +117,8 @@ When a job is cancelled (via scale-down or undeploy), the controller records a c
 
 Cancellations are delivered exactly once — the poll endpoint is a destructive read.
 
+Late results arriving after a job has been cancelled are silently ignored; terminal state is never overwritten.
+
 ---
 
 ### Scheduler
@@ -129,7 +135,7 @@ Jobs are placed using a pipeline of:
 
 ### Docker Execution
 
-Jobs can run inside Docker containers using `docker run --rm --network none`. Containers clean up after themselves and have no outbound network access by default. The agent captures the container ID via `--cidfile` to enable cancellation via `docker stop`.
+Jobs can run inside Docker containers using `docker run --rm --network none`. Containers are named `tcp-{job_id[:16]}` so the agent can reliably stop them by name during cancellation. Containers clean up after themselves and have no outbound network access by default.
 
 ---
 
@@ -138,12 +144,12 @@ Jobs can run inside Docker containers using `docker run --rm --network none`. Co
 A workload declares a desired number of replicas for a command:
 
 ```bash
-python cli/tcp.py deploy workers uptime 3
-python cli/tcp.py deploy alpine-workers "echo hello" 2 --image alpine
-python cli/tcp.py deploy eu-workers uptime 3 --constraint region=eu
+tcp deploy workers uptime 3
+tcp deploy alpine-workers "echo hello" 2 --image alpine
+tcp deploy eu-workers uptime 3 --constraint region=homelab
 ```
 
-The controller ensures the declared number of replicas are always running. If jobs finish, fail, or get lost, the reconciler schedules replacements on the next pass. Each job is linked to its workload by name, so two workloads with the same command do not interfere with each other's replica counts.
+The controller ensures the declared number of replicas are always running. If jobs finish, fail, or get lost, the reconciler schedules replacements on the next pass.
 
 ---
 
@@ -152,7 +158,7 @@ The controller ensures the declared number of replicas are always running. If jo
 To change the replica count of a running workload:
 
 ```bash
-python cli/tcp.py scale workers 1
+tcp scale workers 1
 ```
 
 Scaling up schedules new jobs on the next reconcile pass. Scaling down immediately cancels excess jobs — pending jobs are cancelled before running ones — and sends kill signals to the agents hosting them.
@@ -162,20 +168,20 @@ Scaling up schedules new jobs on the next reconcile pass. Scaling down immediate
 ### Stopping Workloads
 
 ```bash
-python cli/tcp.py undeploy workers
+tcp undeploy workers
 ```
 
-Removes the workload from the controller. The reconciler stops scheduling new jobs for it. Running jobs complete normally unless explicitly cancelled beforehand.
+Cancels all running and pending jobs for the workload, then removes it from the controller. Running jobs are terminated, not left to complete.
 
 ---
 
 ### Node Revocation
 
 ```bash
-python cli/tcp.py revoke node1
+tcp revoke node1
 ```
 
-Sets the node token to NULL. The node's next request receives a 401. The agent logs the rejection and backs off rather than crashing, preserving any in-memory state.
+Sets the node token to NULL. The node's next request receives a 401. The agent logs the rejection and exits immediately.
 
 ---
 
@@ -184,20 +190,57 @@ Sets the node token to NULL. The node's next request receives a 401. The agent l
 Agent stdout is captured line by line and stored in the controller database.
 
 ```bash
-python cli/tcp.py logs <job_id>
+tcp logs <job_id> [-f]   # print captured output; -f streams live via SSE until job is terminal
 ```
 
 Works for both shell and Docker workloads.
 
 ---
 
+### Event Log
+
+The controller records a structured event for every significant lifecycle transition.
+
+```bash
+tcp events [-f]          # recent events (last 200); -f streams live via SSE
+```
+
+Event kinds:
+
+| Kind | Meaning |
+|---|---|
+| `node.registered` | Agent registered or re-registered |
+| `node.revoked` | Node token revoked |
+| `workload.created` | New workload declared |
+| `workload.scaled` | Replica count changed |
+| `workload.deleting` | Undeploy initiated, cancelling jobs |
+| `workload.removed` | Workload fully removed |
+| `job.scheduled` | Job assigned to a node |
+| `job.started` | Agent picked up the job |
+| `job.succeeded` | Job exited 0 |
+| `job.failed` | Job exited non-zero |
+| `job.cancelled` | Job explicitly cancelled by operator action |
+| `job.lost` | Job lost due to agent disappearance or lease expiry |
+
+---
+
 ### Status View
 
 ```bash
-python cli/tcp.py status
+tcp status [-f]   # job status table; -f redraws live every second
 ```
 
 Displays a formatted table of all jobs with node, workload, command, colour-coded status, and elapsed time. Active jobs show time since creation. Terminal jobs show how long they actually ran.
+
+---
+
+### Topology View
+
+```bash
+tcp topology [-f]   # cluster tree: nodes with their active jobs as leaves; -f redraws live every second
+```
+
+Displays a tree rooted at the cluster, with nodes as branches and their active jobs as leaves. Each node shows current CPU, memory, and job count. The cluster root shows aggregate node count, job count, and average CPU.
 
 ---
 
@@ -231,7 +274,7 @@ Start agents:
 
 ```bash
 python agent/agent.py --node-id node1 --port 9000
-python agent/agent.py --node-id node1 --port 9000 --label region=eu
+python agent/agent.py --node-id node2 --port 9001 --label region=homelab
 ```
 
 ---
@@ -239,17 +282,18 @@ python agent/agent.py --node-id node1 --port 9000 --label region=eu
 # CLI Reference
 
 ```bash
-python cli/tcp.py nodes                                          # list nodes
-python cli/tcp.py watch                                          # live node view
-python cli/tcp.py exec <node> <command> [--image <image>]        # run one-off job
-python cli/tcp.py deploy <name> <command> <replicas> \
-    [--image <image>] [--constraint key=value]                   # declare workload
-python cli/tcp.py scale <name> <replicas>                        # change replica count
-python cli/tcp.py undeploy <name>                                # remove workload
-python cli/tcp.py revoke <node>                                  # revoke node token
-python cli/tcp.py status                                         # job status table
-python cli/tcp.py jobs                                           # raw job list (JSON)
-python cli/tcp.py logs <job_id>                                  # job output
+tcp nodes                                                # list nodes
+tcp topology [-f]                                        # cluster tree view; -f live
+tcp exec <node> <command> [--image <image>]              # run one-off job
+tcp deploy <n> <command> <replicas> \
+    [--image <image>] [--constraint key=value]           # declare workload
+tcp scale <n> <replicas>                                 # change replica count
+tcp undeploy <n>                                         # remove workload, cancels jobs
+tcp revoke <node>                                        # revoke node token
+tcp status [-f]                                          # job status table; -f live
+tcp jobs                                                 # raw job list (JSON)
+tcp logs <job_id> [-f]                                   # job output; -f stream live
+tcp events [-f]                                          # recent cluster events; -f stream live
 ```
 
 ---
@@ -261,4 +305,3 @@ pytest
 ```
 
 Tests are synchronous and call `reconcile_once()` directly. Each test gets an isolated SQLite database via `tmp_path`.
-
