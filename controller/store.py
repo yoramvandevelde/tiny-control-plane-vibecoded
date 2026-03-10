@@ -16,6 +16,9 @@ DB_PATH = "cluster.db"
 # How long a running job's lease is valid before it is considered lost.
 LEASE_SECONDS = 60
 
+# Undelivered/Unacked cancel messages are retried after this delay.
+CANCEL_REDELIVER_SECONDS = 30
+
 
 def get_db() -> sqlite3.Connection:
     """Return a per-thread SQLite connection, (re)opening it when necessary."""
@@ -318,7 +321,13 @@ def create_job(
 def get_pending_job(node_id: str):
     """Return the oldest PENDING job for a node, or None if there is none."""
     return get_db().execute(
-        "SELECT id, command, image FROM jobs WHERE node_id=? AND status=? LIMIT 1",
+        """
+        SELECT id, command, image
+        FROM jobs
+        WHERE node_id=? AND status=?
+        ORDER BY created ASC, id ASC
+        LIMIT 1
+        """,
         (node_id, JobStatus.PENDING),
     ).fetchone()
 
@@ -602,9 +611,9 @@ def get_pending_cancels(node_id: str) -> list:
             FROM cancel_jobs
             WHERE node_id = ?
             AND acked IS NULL
-            AND delivered IS NULL
+            AND (delivered IS NULL OR delivered < ?)
             """,
-            (node_id,),
+            (node_id, now - CANCEL_REDELIVER_SECONDS),
         ).fetchall()
 
         job_ids = [r[0] for r in rows]

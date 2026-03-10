@@ -1,4 +1,5 @@
 import os
+import time
 from controller.store import (
     init_db,
     register_node,
@@ -131,3 +132,26 @@ def test_undeploy_cancels_active_jobs(tmp_path):
     assert all(j["status"] == JobStatus.CANCELLED for j in jobs)
     queued = get_pending_cancels("node1")
     assert len(queued) == 2
+
+
+def test_cancel_redelivers_if_not_acked_after_timeout(tmp_path):
+    _setup(tmp_path)
+
+    _ = register_node("node1", "http://localhost:9000")
+    job_id = create_job("node1", "sleep 100")
+    start_job(job_id)
+
+    enqueue_cancel(job_id, "node1")
+    first = get_pending_cancels("node1")
+    assert job_id in first
+
+    # Mark the delivery old enough to be retried.
+    from controller.store import get_db, CANCEL_REDELIVER_SECONDS
+    get_db().execute(
+        "UPDATE cancel_jobs SET delivered=? WHERE job_id=?",
+        (time.time() - CANCEL_REDELIVER_SECONDS - 1, job_id),
+    )
+    get_db().commit()
+
+    retried = get_pending_cancels("node1")
+    assert job_id in retried
