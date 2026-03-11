@@ -24,7 +24,7 @@
 
 - [X] **DB pruning** — terminal jobs and old events accumulate forever. `cancel_jobs` rows are pruned automatically by the reconciler on every pass (acked rows immediately; unacked rows after `CANCEL_REDELIVER_SECONDS`). Operator-triggered pruning via `tcp gc [--days N] [--dry-run]` removes old terminal jobs (cascading to logs and cancel_jobs) and old events.
 
-- [ ] **Missing CLI commands** — add `tcp workloads` (list all workloads), `tcp describe workload <name>`, `tcp describe job <id>`, and `tcp describe node <id>` for better day-to-day usability.
+- [X] **Missing CLI commands** — add `tcp workloads` (list all workloads), `tcp describe workload <name>`, `tcp describe job <id>`, and `tcp describe node <id>` for better day-to-day usability.
 
 - [ ] **Watch streams** — the event architecture (`list_events` / `get_events_since` / `events/stream`) already mirrors the Kubernetes list/watch pattern. `tcp watch jobs`, `tcp watch nodes`, and `tcp watch workloads` would be natural extensions with minimal new controller work.
 
