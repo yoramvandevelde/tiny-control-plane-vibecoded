@@ -14,6 +14,10 @@ tcp deploy <n> <command> <replicas> \
     --image <image> [--constraint key=value]             # declare workload
 tcp scale <n> <replicas>                                 # change replica count
 tcp undeploy <n>                                         # remove workload, cancels jobs
+tcp workloads                                            # list workloads with replica health
+tcp describe job <id>                                    # detailed job info + recent logs
+tcp describe node <id>                                   # detailed node info + active jobs
+tcp describe workload <name>                             # detailed workload info + all jobs
 tcp revoke <node>                                        # revoke node token
 tcp status [-f]                                          # job status table; -f live
 tcp jobs                                                 # raw job list (JSON)
@@ -108,6 +112,49 @@ Displays a tree rooted at the cluster, with nodes as branches and their active j
 ### `tcp jobs`
 
 Prints the raw job list as JSON. Useful for scripting.
+
+---
+
+### `tcp workloads`
+
+Lists all declared workloads with their image, command, desired replica count, and how many replicas are currently active. The running count is shown in green when it meets the desired count, yellow when it falls short.
+
+```
+name      image    command     desired  running  constraints
+workers   alpine   sleep 100   3        3/3      region=eu
+```
+
+---
+
+### `tcp describe job <id>`
+
+Shows full details for a job: status, node, workload, image, command, elapsed time, resource requests, and exit result. Appends the last 10 log lines with a hint to use `tcp logs` for the full output.
+
+`<id>` can be a prefix — the shortest unambiguous prefix is enough.
+
+```bash
+tcp describe job 7b2e31
+```
+
+---
+
+### `tcp describe node <id>`
+
+Shows full details for a node: health, version, address, last-seen age, capacity, current CPU/memory usage, labels, and active job count. Appends a live job table for any jobs currently running on the node.
+
+```bash
+tcp describe node node1
+```
+
+---
+
+### `tcp describe workload <n>`
+
+Shows full details for a workload: image, command, active vs desired replica count, resource requests, and constraints. Appends a job table covering all jobs ever scheduled for the workload (active and terminal).
+
+```bash
+tcp describe workload workers
+```
 
 ---
 

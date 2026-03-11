@@ -68,6 +68,8 @@ python agent/agent.py --node-id node2 --port 9001 --label region=homelab
 tcp nodes
 tcp exec node1 "echo hello" --image alpine
 tcp deploy workers "echo hello" 3 --image alpine
+tcp workloads
+tcp describe workload workers
 tcp status -f
 ```
 

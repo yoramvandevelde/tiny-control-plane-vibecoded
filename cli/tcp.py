@@ -25,7 +25,9 @@ from rich.tree import Tree
 
 API = os.environ.get("TCP_CONTROLLER", "http://localhost:8000")
 
-app     = typer.Typer(help="Tiny Control Plane — cluster management CLI.")
+app          = typer.Typer(help="Tiny Control Plane — cluster management CLI.")
+describe_app = typer.Typer(help="Inspect cluster objects in detail.")
+app.add_typer(describe_app, name="describe")
 console = Console()
 
 ACTIVE_STATUSES = {"pending", "running"}
@@ -345,6 +347,193 @@ def logs(
 # ---------------------------------------------------------------------------
 # Workload commands
 # ---------------------------------------------------------------------------
+
+@app.command()
+def workloads():
+    """List all workloads with their replica counts and image."""
+    r = httpx.get(f"{API}/workloads", headers=_operator_headers())
+    r.raise_for_status()
+    data = r.json()
+
+    if not data:
+        console.print("[dim]no workloads[/dim]")
+        return
+
+    # Fetch jobs to compute live replica counts.
+    jobs_r = httpx.get(f"{API}/jobs", headers=_operator_headers())
+    job_list = jobs_r.json()
+
+    # Count active jobs per workload.
+    active_by_workload: dict[str, int] = {}
+    for j in job_list:
+        if j.get("status") in ACTIVE_STATUSES and j.get("workload_name"):
+            active_by_workload[j["workload_name"]] = active_by_workload.get(j["workload_name"], 0) + 1
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("name",     no_wrap=True)
+    table.add_column("image",    no_wrap=True, style="dim")
+    table.add_column("command",  no_wrap=True)
+    table.add_column("desired",  justify="right", no_wrap=True)
+    table.add_column("running",  justify="right", no_wrap=True)
+    table.add_column("constraints", no_wrap=True, style="dim")
+
+    for w in sorted(data, key=lambda x: x["name"]):
+        desired  = w["replicas"]
+        running  = active_by_workload.get(w["name"], 0)
+        rep_str  = f"[green]{running}[/green]" if running >= desired else f"[yellow]{running}[/yellow]"
+        constraints = ", ".join(f"{k}={v}" for k, v in (w.get("constraints") or {}).items()) or "-"
+
+        table.add_row(
+            w["name"],
+            w.get("image") or "-",
+            (w.get("command") or "")[:50],
+            str(desired),
+            rep_str,
+            constraints,
+        )
+
+    console.print(table)
+
+
+@describe_app.command("job")
+def describe_job(
+    job_id: str = typer.Argument(..., help="Job ID or prefix."),
+):
+    """Show detailed information about a job."""
+    headers  = _operator_headers()
+    job_list = httpx.get(f"{API}/jobs", headers=headers).json()
+
+    matches = [j for j in job_list if j["id"].startswith(job_id)]
+    if not matches:
+        console.print(f"[red]error:[/red] no job found matching '{job_id}'")
+        raise typer.Exit(1)
+    if len(matches) > 1:
+        console.print(f"[yellow]ambiguous prefix '{job_id}' — matches {len(matches)} jobs:[/yellow]")
+        for j in matches:
+            console.print(f"  {j['id']}")
+        raise typer.Exit(1)
+
+    j       = matches[0]
+    now     = time.time()
+    created = j.get("created") or now
+    updated = j.get("updated") or now
+    status  = j["status"]
+    elapsed = _fmt_elapsed(now - created) if status in ACTIVE_STATUSES else _fmt_elapsed(updated - created)
+
+    table = Table(show_header=False, box=None, padding=(0, 2, 0, 0))
+    table.add_column("field", style="bold", no_wrap=True)
+    table.add_column("value")
+
+    table.add_row("id",       j["id"])
+    table.add_row("status",   _coloured(status))
+    table.add_row("node",     j.get("node") or "-")
+    table.add_row("workload", j.get("workload_name") or "-")
+    table.add_row("image",    j.get("image") or "-")
+    table.add_row("command",  j.get("command") or "-")
+    table.add_row("elapsed",  elapsed)
+    if j.get("result"):
+        table.add_row("result", j["result"])
+    req_cpu = j.get("req_cpu") or 0
+    req_mem = j.get("req_mem_mb") or 0
+    if req_cpu or req_mem:
+        table.add_row("cpu request", str(req_cpu))
+        table.add_row("mem request", f"{req_mem} MiB")
+
+    console.print(table)
+
+    logs_r    = httpx.get(f"{API}/jobs/{j['id']}/logs", headers=headers)
+    log_lines = logs_r.json()
+    if log_lines:
+        console.print(f"\n[bold]logs[/bold] ({len(log_lines)} lines):")
+        for entry in log_lines[-10:]:
+            console.print(f"  {entry['line']}")
+        if len(log_lines) > 10:
+            console.print(f"  [dim]… {len(log_lines) - 10} earlier lines — use `tcp logs {j['id'][:8]}` to see all[/dim]")
+
+
+@describe_app.command("node")
+def describe_node(
+    node_id: str = typer.Argument(..., help="Node ID."),
+):
+    """Show detailed information about a node."""
+    headers    = _operator_headers()
+    nodes_data = httpx.get(f"{API}/nodes", headers=headers).json()
+
+    if node_id not in nodes_data:
+        console.print(f"[red]error:[/red] node '{node_id}' not found")
+        raise typer.Exit(1)
+
+    info    = nodes_data[node_id]
+    healthy = info.get("healthy", False)
+    state   = info.get("state") or {}
+    labels  = info.get("labels") or {}
+    last    = info.get("last_seen")
+    ago     = _fmt_elapsed(time.time() - last) + " ago" if last else "-"
+
+    job_list  = httpx.get(f"{API}/jobs", headers=headers).json()
+    node_jobs = [j for j in job_list if j.get("node") == node_id]
+    active    = [j for j in node_jobs if j["status"] in ACTIVE_STATUSES]
+
+    table = Table(show_header=False, box=None, padding=(0, 2, 0, 0))
+    table.add_column("field", style="bold", no_wrap=True)
+    table.add_column("value")
+
+    table.add_row("node",      node_id)
+    table.add_row("healthy",   "[green]yes[/green]" if healthy else "[red]no[/red]")
+    table.add_row("version",   info.get("version") or "-")
+    table.add_row("address",   info.get("address") or "-")
+    table.add_row("last seen", ago)
+    table.add_row("capacity",  f"{info.get('total_cpu', 1)} CPU / {info.get('total_mem_mb', 512)} MiB")
+    if state:
+        table.add_row("cpu usage", f"{state.get('cpu', 0):.0%}")
+        table.add_row("mem usage", f"{state.get('mem', 0):.0%}")
+    table.add_row("jobs",      f"{len(active)} active / {len(node_jobs)} total")
+    if labels:
+        table.add_row("labels", ", ".join(f"{k}={v}" for k, v in labels.items()))
+
+    console.print(table)
+
+    if active:
+        console.print()
+        console.print(_build_status_table(active, time.time()))
+
+
+@describe_app.command("workload")
+def describe_workload(
+    name: str = typer.Argument(..., help="Workload name."),
+):
+    """Show detailed information about a workload."""
+    headers       = _operator_headers()
+    workload_list = httpx.get(f"{API}/workloads", headers=headers).json()
+
+    w = next((x for x in workload_list if x["name"] == name), None)
+    if not w:
+        console.print(f"[red]error:[/red] workload '{name}' not found")
+        raise typer.Exit(1)
+
+    job_list = httpx.get(f"{API}/jobs", headers=headers).json()
+    wjobs    = [j for j in job_list if j.get("workload_name") == name]
+    active   = [j for j in wjobs if j["status"] in ACTIVE_STATUSES]
+    constraints = w.get("constraints") or {}
+
+    table = Table(show_header=False, box=None, padding=(0, 2, 0, 0))
+    table.add_column("field", style="bold", no_wrap=True)
+    table.add_column("value")
+
+    table.add_row("name",        w["name"])
+    table.add_row("image",       w.get("image") or "-")
+    table.add_row("command",     w.get("command") or "-")
+    table.add_row("replicas",    f"{len(active)}/{w['replicas']}")
+    table.add_row("cpu request", str(w.get("req_cpu") or 0))
+    table.add_row("mem request", f"{w.get('req_mem_mb') or 0} MiB")
+    table.add_row("constraints", ", ".join(f"{k}={v}" for k, v in constraints.items()) or "-")
+
+    console.print(table)
+
+    if wjobs:
+        console.print()
+        console.print(_build_status_table(wjobs, time.time()))
+
 
 @app.command()
 def deploy(
