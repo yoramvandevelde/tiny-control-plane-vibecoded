@@ -11,13 +11,14 @@ tcp nodes                                                # list nodes
 tcp topology [-f]                                        # cluster tree view; -f live
 tcp exec <node> <command> --image <image>                # run one-off job
 tcp deploy <n> <command> <replicas> \
-    --image <image> [--constraint key=value]             # declare workload
+    --image <image> [--constraint key=value] \
+    [--max-attempts N]                                   # declare workload (default unlimited)
 tcp scale <n> <replicas>                                 # change replica count
 tcp undeploy <n>                                         # remove workload, cancels jobs
 tcp workloads                                            # list workloads with replica health
 tcp describe job <id>                                    # detailed job info + recent logs
 tcp describe node <id>                                   # detailed node info + active jobs
-tcp describe workload <name>                             # detailed workload info + all jobs
+tcp describe workload <n>                                # detailed workload info + all jobs
 tcp revoke <node>                                        # revoke node token
 tcp status [-f]                                          # job status table; -f live
 tcp jobs                                                 # raw job list (JSON)
@@ -48,20 +49,23 @@ tcp exec node1 "echo hello" --image alpine
 
 ---
 
-### `tcp deploy <name> <command> <replicas> --image <image>`
+### `tcp deploy <n> <command> <replicas> --image <image>`
 
 Declares a workload with a desired replica count. The controller continuously ensures this many replicas are running.
 
 ```bash
 tcp deploy alpine-workers "echo hello" 2 --image alpine
 tcp deploy eu-workers uptime 3 --image alpine --constraint region=homelab
+tcp deploy flaky-job "python run.py" 2 --image python:3.12 --max-attempts 5
 ```
 
 Use `--constraint key=value` to restrict scheduling to nodes with matching labels. Multiple `--constraint` flags are ANDed together.
 
+`--max-attempts` caps how many times the reconciler will reschedule a failing replica before considering the workload exhausted. By default there is no limit — the reconciler will keep scheduling replacements indefinitely. Set `--max-attempts N` to stop after N failures. When the limit is reached the reconciler emits a `workload.exhausted` event and stops scheduling — the workload definition stays in place so you can fix the command and redeploy. Cancelled jobs do not count against the attempt limit.
+
 ---
 
-### `tcp scale <name> <replicas>`
+### `tcp scale <n> <replicas>`
 
 Changes the replica count of a running workload.
 
@@ -73,7 +77,7 @@ Scaling up schedules new jobs immediately. Scaling down cancels excess jobs — 
 
 ---
 
-### `tcp undeploy <name>`
+### `tcp undeploy <n>`
 
 Cancels all running and pending jobs for the workload and removes it from the controller. Running containers are stopped immediately, not left to complete.
 
@@ -117,11 +121,11 @@ Prints the raw job list as JSON. Useful for scripting.
 
 ### `tcp workloads`
 
-Lists all declared workloads with their image, command, desired replica count, and how many replicas are currently active. The running count is shown in green when it meets the desired count, yellow when it falls short.
+Lists all declared workloads with their image, command, desired replica count, how many replicas are currently active, and the `max-attempts` limit. The running count is shown in green when it meets the desired count, yellow when it falls short. A `max-attempts` of `0` is shown as `unlimited`.
 
 ```
-name      image    command     desired  running  constraints
-workers   alpine   sleep 100   3        3/3      region=eu
+name      image    command     desired  running  max-attempts  constraints
+workers   alpine   sleep 100   3        3        unlimited     region=eu
 ```
 
 ---
@@ -150,7 +154,7 @@ tcp describe node node1
 
 ### `tcp describe workload <n>`
 
-Shows full details for a workload: image, command, active vs desired replica count, resource requests, and constraints. Appends a job table covering all jobs ever scheduled for the workload (active and terminal).
+Shows full details for a workload: image, command, active vs desired replica count, max-attempts, resource requests, and constraints. Appends a job table covering all jobs ever scheduled for the workload (active and terminal).
 
 ```bash
 tcp describe workload workers
@@ -174,11 +178,9 @@ Prints the most recent 200 cluster events.
 
 ---
 
-`tcp gc [--days N] [--dry-run]`
-Removes old terminal jobs (succeeded/failed/cancelled/lost) and old events from
-the database. Log lines and cancel signal entries for pruned jobs are removed
-in the same operation.
+### `tcp gc [--days N] [--dry-run]`
 
+Removes old terminal jobs (succeeded/failed/cancelled/lost) and old events from the database. Log lines and cancel signal entries for pruned jobs are removed in the same operation.
 
 ```bash
 tcp gc                  # delete rows older than 7 days (default)
@@ -186,11 +188,9 @@ tcp gc --days 30        # use a custom age threshold
 tcp gc --dry-run        # preview what would be deleted without removing anything
 ```
 
-`--dry-run` calls a read-only preview endpoint and prints row counts without
-deleting anything. Use it before running gc on a production cluster.
+`--dry-run` calls a read-only preview endpoint and prints row counts without deleting anything. Use it before running gc on a production cluster.
 
-`cancel_jobs` rows are pruned automatically by the reconciler and do not
-require manual gc.
+`cancel_jobs` rows are pruned automatically by the reconciler and do not require manual gc.
 
 ---
 
@@ -204,6 +204,7 @@ require manual gc.
 | `workload.scaled` | Replica count changed |
 | `workload.deleting` | Undeploy initiated, cancelling jobs |
 | `workload.removed` | Workload fully removed |
+| `workload.exhausted` | Workload hit max-attempts limit, no further scheduling |
 | `job.scheduled` | Job assigned to a node |
 | `job.started` | Agent picked up the job |
 | `job.succeeded` | Job exited 0 |

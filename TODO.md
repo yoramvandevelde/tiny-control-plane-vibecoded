@@ -20,11 +20,11 @@
 
 ## Features
 
-- [ ] **Job retry policy** — failed jobs stay failed and workloads that always fail spin forever scheduling replacements. Add `--retries` and `--max-attempts` to `tcp deploy`, track attempt count in the DB, and reschedule with backoff only if retries remain.
+- [X] **Job retry policy** — `--max-attempts` added to `tcp deploy` (default unlimited (0), set to a positive integer to cap retries). `attempt` counter and `max_attempts` column already present in DB. Reconciler checks `count_failed_workload_jobs` against `max_attempts * replicas` before scheduling; emits `workload.exhausted` event when limit is reached. Cancelled jobs excluded from the failure count.
 
 - [X] **DB pruning** — terminal jobs and old events accumulate forever. `cancel_jobs` rows are pruned automatically by the reconciler on every pass (acked rows immediately; unacked rows after `CANCEL_REDELIVER_SECONDS`). Operator-triggered pruning via `tcp gc [--days N] [--dry-run]` removes old terminal jobs (cascading to logs and cancel_jobs) and old events.
 
-- [X] **Missing CLI commands** — add `tcp workloads` (list all workloads), `tcp describe workload <name>`, `tcp describe job <id>`, and `tcp describe node <id>` for better day-to-day usability.
+- [X] **Missing CLI commands** — added `tcp workloads` (list all workloads with replica health), `tcp describe workload <n>`, `tcp describe job <id>`, and `tcp describe node <id>`. The `describe` commands are a sub-app (`tcp describe --help` works independently) using a key/value table layout. `tcp describe job` supports ID prefix matching and shows the last 10 log lines inline.
 
 - [ ] **Watch streams** — the event architecture (`list_events` / `get_events_since` / `events/stream`) already mirrors the Kubernetes list/watch pattern. `tcp watch jobs`, `tcp watch nodes`, and `tcp watch workloads` would be natural extensions with minimal new controller work.
 

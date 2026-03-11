@@ -11,6 +11,7 @@ from controller.store import (
     JobStatus,
     count_active_node_jobs,
     count_active_workload_jobs,
+    count_failed_workload_jobs,
     create_job,
     create_workload,
     delete_workload,
@@ -192,13 +193,36 @@ def reconcile_once():
         running = count_active_workload_jobs(w["name"])
         missing = w["replicas"] - running
 
+        if missing <= 0:
+            continue
+
+        max_attempts = w.get("max_attempts", 0)
+        failed       = count_failed_workload_jobs(w["name"])
+
+        # Total attempts used = active jobs + failed jobs. If we've already
+        # exhausted max_attempts across all replicas, stop scheduling.
+        # A max_attempts of 0 means unlimited retries.
+        if max_attempts > 0 and (running + failed) >= max_attempts * w["replicas"]:
+            record_event(
+                "workload.exhausted",
+                f"workload {w['name']} exhausted after {failed} failure(s) — max_attempts={max_attempts}",
+            )
+            continue
+
         req_cpu = w.get("req_cpu", 0)
         req_mem = w.get("req_mem_mb", 0)
 
         for _ in range(missing):
+            # Recheck exhaustion each iteration in case we're filling multiple replicas.
+            failed_now = count_failed_workload_jobs(w["name"])
+            if max_attempts > 0 and (running + failed_now) >= max_attempts * w["replicas"]:
+                break
+
             node_id = pick_node(nodes, w.get("constraints", {}), {"cpu": req_cpu, "mem": req_mem})
             if node_id is None:
                 break
+
+            attempt = failed_now + running + 1
             create_job(
                 node_id,
                 w["command"],
@@ -206,6 +230,7 @@ def reconcile_once():
                 workload_name=w["name"],
                 req_cpu=req_cpu,
                 req_mem_mb=req_mem,
+                attempt=attempt,
             )
 
     prune_stale_cancel_jobs()

@@ -370,18 +370,21 @@ def workloads():
             active_by_workload[j["workload_name"]] = active_by_workload.get(j["workload_name"], 0) + 1
 
     table = Table(show_header=True, header_style="bold")
-    table.add_column("name",     no_wrap=True)
-    table.add_column("image",    no_wrap=True, style="dim")
-    table.add_column("command",  no_wrap=True)
-    table.add_column("desired",  justify="right", no_wrap=True)
-    table.add_column("running",  justify="right", no_wrap=True)
-    table.add_column("constraints", no_wrap=True, style="dim")
+    table.add_column("name",         no_wrap=True)
+    table.add_column("image",        no_wrap=True, style="dim")
+    table.add_column("command",      no_wrap=True)
+    table.add_column("desired",      justify="right", no_wrap=True)
+    table.add_column("running",      justify="right", no_wrap=True)
+    table.add_column("max-attempts", justify="right", no_wrap=True)
+    table.add_column("constraints",  no_wrap=True, style="dim")
 
     for w in sorted(data, key=lambda x: x["name"]):
-        desired  = w["replicas"]
-        running  = active_by_workload.get(w["name"], 0)
-        rep_str  = f"[green]{running}[/green]" if running >= desired else f"[yellow]{running}[/yellow]"
-        constraints = ", ".join(f"{k}={v}" for k, v in (w.get("constraints") or {}).items()) or "-"
+        desired      = w["replicas"]
+        running      = active_by_workload.get(w["name"], 0)
+        max_attempts = w.get("max_attempts", 3)
+        rep_str      = f"[green]{running}[/green]" if running >= desired else f"[yellow]{running}[/yellow]"
+        constraints  = ", ".join(f"{k}={v}" for k, v in (w.get("constraints") or {}).items()) or "-"
+        att_str      = "[dim]unlimited[/dim]" if max_attempts == 0 else str(max_attempts)
 
         table.add_row(
             w["name"],
@@ -389,6 +392,7 @@ def workloads():
             (w.get("command") or "")[:50],
             str(desired),
             rep_str,
+            att_str,
             constraints,
         )
 
@@ -523,10 +527,13 @@ def describe_workload(
     table.add_row("name",        w["name"])
     table.add_row("image",       w.get("image") or "-")
     table.add_row("command",     w.get("command") or "-")
-    table.add_row("replicas",    f"{len(active)}/{w['replicas']}")
-    table.add_row("cpu request", str(w.get("req_cpu") or 0))
-    table.add_row("mem request", f"{w.get('req_mem_mb') or 0} MiB")
-    table.add_row("constraints", ", ".join(f"{k}={v}" for k, v in constraints.items()) or "-")
+    max_att = w.get("max_attempts", 3)
+    att_str = "unlimited" if max_att == 0 else str(max_att)
+    table.add_row("replicas",     f"{len(active)}/{w['replicas']}")
+    table.add_row("max-attempts", att_str)
+    table.add_row("cpu request",  str(w.get("req_cpu") or 0))
+    table.add_row("mem request",  f"{w.get('req_mem_mb') or 0} MiB")
+    table.add_row("constraints",  ", ".join(f"{k}={v}" for k, v in constraints.items()) or "-")
 
     console.print(table)
 
@@ -537,19 +544,24 @@ def describe_workload(
 
 @app.command()
 def deploy(
-    name:       str            = typer.Argument(..., help="Unique name for the workload."),
-    command:    str            = typer.Argument(..., help="Command each replica will run."),
-    replicas:   int            = typer.Argument(..., help="Number of replicas to maintain."),
-    image:      str            = typer.Option(...,   help="Docker image to run the command in."),
-    constraint: Optional[list[str]] = typer.Option(None, help="Node label constraint in key=value format. Repeatable."),
+    name:         str                 = typer.Argument(..., help="Unique name for the workload."),
+    command:      str                 = typer.Argument(..., help="Command each replica will run."),
+    replicas:     int                 = typer.Argument(..., help="Number of replicas to maintain."),
+    image:        str                 = typer.Option(...,   help="Docker image to run the command in."),
+    constraint:   Optional[list[str]] = typer.Option(None, help="Node label constraint in key=value format. Repeatable."),
+    max_attempts: int                 = typer.Option(0,     help="Max scheduling attempts per replica before the workload is considered exhausted. Defaults to unlimited (0). Set to a positive integer to cap retries."),
 ):
     """
     Deploy a workload — the reconciler will schedule and maintain the requested number of replicas.
 
     All replicas run inside Docker containers. --image is required.
 
+    --max-attempts caps how many times the reconciler will reschedule a
+    failing replica. Omit the flag (or pass 0) for unlimited retries.
+
     Example:
         tcp deploy workers 'python worker.py' 4 --image python:3.12 --constraint region=eu
+        tcp deploy workers 'python worker.py' 4 --image python:3.12 --max-attempts 0
     """
     constraints = {}
     for c in (constraint or []):
@@ -559,11 +571,12 @@ def deploy(
     r = httpx.post(
         f"{API}/workloads",
         json={
-            "name":        name,
-            "command":     command,
-            "replicas":    replicas,
-            "image":       image,
-            "constraints": constraints or None,
+            "name":         name,
+            "command":      command,
+            "replicas":     replicas,
+            "image":        image,
+            "constraints":  constraints or None,
+            "max_attempts": max_attempts,
         },
         headers=_operator_headers(),
     )

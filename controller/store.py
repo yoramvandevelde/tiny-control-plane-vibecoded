@@ -74,21 +74,23 @@ def init_db(path: str = None):
             created       REAL,
             updated       REAL,
             lease_expires REAL,
-            req_cpu     INTEGER DEFAULT 0,
-            req_mem_mb  INTEGER DEFAULT 0
+            req_cpu       INTEGER DEFAULT 0,
+            req_mem_mb    INTEGER DEFAULT 0,
+            attempt       INTEGER DEFAULT 1
         )
     """)
 
     db.execute("""
         CREATE TABLE IF NOT EXISTS workloads (
-            name        TEXT PRIMARY KEY,
-            command     TEXT,
-            image       TEXT,
-            replicas    INTEGER,
-            constraints TEXT,
-            resources   TEXT,
-            req_cpu     INTEGER DEFAULT 0,
-            req_mem_mb  INTEGER DEFAULT 0
+            name         TEXT PRIMARY KEY,
+            command      TEXT,
+            image        TEXT,
+            replicas     INTEGER,
+            constraints  TEXT,
+            resources    TEXT,
+            req_cpu      INTEGER DEFAULT 0,
+            req_mem_mb   INTEGER DEFAULT 0,
+            max_attempts INTEGER DEFAULT 0
         )
     """)
 
@@ -130,6 +132,16 @@ def init_db(path: str = None):
         db.execute("ALTER TABLE nodes ADD COLUMN total_cpu INTEGER DEFAULT 1")
     if "total_mem_mb" not in existing:
         db.execute("ALTER TABLE nodes ADD COLUMN total_mem_mb INTEGER DEFAULT 512")
+    db.commit()
+
+    existing_jobs = {row[1] for row in db.execute("PRAGMA table_info(jobs)").fetchall()}
+    if "attempt" not in existing_jobs:
+        db.execute("ALTER TABLE jobs ADD COLUMN attempt INTEGER DEFAULT 1")
+
+    existing_workloads = {row[1] for row in db.execute("PRAGMA table_info(workloads)").fetchall()}
+    if "max_attempts" not in existing_workloads:
+        db.execute("ALTER TABLE workloads ADD COLUMN max_attempts INTEGER DEFAULT 0")
+
     db.commit()
 
 
@@ -283,6 +295,7 @@ def create_job(
     workload_name: str = None,
     req_cpu:       int = 0,
     req_mem_mb:    int = 0,
+    attempt:       int = 1,
 ) -> str:
     """Create a new job in PENDING state and return its UUID."""
     jid = str(uuid.uuid4())
@@ -292,8 +305,8 @@ def create_job(
             INSERT INTO jobs (
                 id, node_id, command, image, workload_name,
                 constraints, resources, status, result, created, updated, lease_expires,
-                req_cpu, req_mem_mb
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                req_cpu, req_mem_mb, attempt
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 jid,
@@ -310,11 +323,13 @@ def create_job(
                 None,
                 req_cpu,
                 req_mem_mb,
+                attempt,
             ),
         )
         get_db().commit()
     workload_part = f" ({workload_name})" if workload_name else ""
-    record_event("job.scheduled", f"job {jid} scheduled on {node_id}{workload_part}")
+    attempt_part  = f" attempt={attempt}" if attempt > 1 else ""
+    record_event("job.scheduled", f"job {jid} scheduled on {node_id}{workload_part}{attempt_part}")
     return jid
 
 
@@ -427,7 +442,7 @@ def list_jobs() -> list:
     """Return all jobs."""
     rows = get_db().execute(
         """SELECT id, node_id, command, image, workload_name, status, result,
-                  created, updated, req_cpu, req_mem_mb
+                  created, updated, req_cpu, req_mem_mb, attempt
            FROM jobs"""
     ).fetchall()
 
@@ -444,6 +459,7 @@ def list_jobs() -> list:
             "updated":       r[8],
             "req_cpu":       r[9],
             "req_mem_mb":    r[10],
+            "attempt":       r[11] or 1,
         }
         for r in rows
     ]
@@ -486,6 +502,19 @@ def count_active_workload_jobs(workload_name: str) -> int:
     return row[0]
 
 
+def count_failed_workload_jobs(workload_name: str) -> int:
+    """
+    Count terminal-failed jobs for a workload (failed + lost).
+    Used by the reconciler to decide whether max_attempts has been reached.
+    Cancelled jobs are excluded — a manual cancel should not count against retries.
+    """
+    row = get_db().execute(
+        "SELECT COUNT(*) FROM jobs WHERE workload_name=? AND status IN (?,?)",
+        (workload_name, JobStatus.FAILED, JobStatus.LOST),
+    ).fetchone()
+    return row[0]
+
+
 def get_excess_workload_jobs(workload_name: str, keep: int) -> list:
     """
     Return (job_id, node_id) tuples for active jobs that exceed the desired
@@ -515,25 +544,26 @@ def get_excess_workload_jobs(workload_name: str, keep: int) -> list:
 # ---------------------------------------------------------------------------
 
 def create_workload(
-    name:        str,
-    command:     str,
-    replicas:    int,
-    image:       str  = None,
-    constraints: dict = None,
-    resources:   dict = None,
-    req_cpu:     int  = 0,
-    req_mem_mb:  int  = 0,
+    name:         str,
+    command:      str,
+    replicas:     int,
+    image:        str  = None,
+    constraints:  dict = None,
+    resources:    dict = None,
+    req_cpu:      int  = 0,
+    req_mem_mb:   int  = 0,
+    max_attempts: int  = 0,
 ):
     """Create or replace a workload definition."""
     with _db_lock:
         get_db().execute(
             """INSERT OR REPLACE INTO workloads
-               (name, command, image, replicas, constraints, resources, req_cpu, req_mem_mb)
-               VALUES (?,?,?,?,?,?,?,?)""",
-            (name, command, image, replicas, json.dumps(constraints or {}), json.dumps(resources or {}), req_cpu, req_mem_mb),
+               (name, command, image, replicas, constraints, resources, req_cpu, req_mem_mb, max_attempts)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (name, command, image, replicas, json.dumps(constraints or {}), json.dumps(resources or {}), req_cpu, req_mem_mb, max_attempts),
         )
         get_db().commit()
-    record_event("workload.created", f"workload {name} created replicas={replicas}")
+    record_event("workload.created", f"workload {name} created replicas={replicas} max_attempts={max_attempts}")
 
 
 def update_workload_replicas(name: str, replicas: int, silent: bool = False) -> bool:
@@ -560,19 +590,20 @@ def delete_workload(name: str):
 def list_workloads() -> list:
     """Return all workload definitions."""
     rows = get_db().execute(
-        "SELECT name, command, image, replicas, constraints, resources, req_cpu, req_mem_mb FROM workloads"
+        "SELECT name, command, image, replicas, constraints, resources, req_cpu, req_mem_mb, max_attempts FROM workloads"
     ).fetchall()
 
     return [
         {
-            "name":        r[0],
-            "command":     r[1],
-            "image":       r[2],
-            "replicas":    r[3],
-            "constraints": json.loads(r[4]) if r[4] else {},
-            "resources":   json.loads(r[5]) if r[5] else {},
-            "req_cpu":     r[6] or 0,
-            "req_mem_mb":  r[7] or 0,
+            "name":         r[0],
+            "command":      r[1],
+            "image":        r[2],
+            "replicas":     r[3],
+            "constraints":  json.loads(r[4]) if r[4] else {},
+            "resources":    json.loads(r[5]) if r[5] else {},
+            "req_cpu":      r[6] or 0,
+            "req_mem_mb":   r[7] or 0,
+            "max_attempts": r[8] if r[8] is not None else 0,
         }
         for r in rows
     ]
